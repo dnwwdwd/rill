@@ -1,0 +1,23 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "Rill 交互原型": {
+      "versions": [
+        {
+          "path": "index.html",
+          "createdAt": "2026-10-31T11:20:49.223Z",
+          "status": "needs-review",
+          "subtitle": "基于 PRD 的桌面 / 手机响应式交互原型",
+          "viewport": {
+            "width": 1440,
+            "height": 1000
+          }
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-10-31T11:20:49.223Z",
+  "updatedAt": "2026-10-31T11:20:49.223Z"
+}

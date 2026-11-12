@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 480" role="img" aria-label="Editorial design cover">
+  <rect width="640" height="480" fill="#EAE8E2"/>
+  <rect x="48" y="48" width="238" height="164" fill="#171A18"/>
+  <rect x="48" y="228" width="112" height="204" fill="#07C160"/>
+  <rect x="176" y="228" width="110" height="96" fill="#171A18" opacity=".16"/>
+  <rect x="176" y="340" width="110" height="92" fill="#171A18"/>
+  <rect x="302" y="48" width="290" height="6" fill="#171A18"/>
+  <rect x="302" y="72" width="206" height="6" fill="#171A18" opacity=".42"/>
+  <rect x="302" y="96" width="248" height="6" fill="#171A18" opacity=".22"/>
+  <circle cx="472" cy="252" r="72" fill="none" stroke="#171A18" stroke-width="2"/>
+  <circle cx="472" cy="252" r="38" fill="#F3F3F0"/>
+  <path d="M430 396h128" stroke="#171A18" stroke-width="2"/>
+  <path d="M430 370h74" stroke="#171A18" stroke-width="2" opacity=".4"/>
+</svg>

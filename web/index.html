@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Rill 统一订阅入口" />
+    <meta name="theme-color" content="#f3f3f0" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/icon.png?v=3" />
+    <link rel="alternate icon" type="image/png" sizes="64x64" href="/favicon-64.png?v=3" />
+    <link rel="apple-touch-icon" href="/icon-180.png?v=3" />
+    <title>Rill · 统一订阅入口</title>
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem("rill.theme");
+          var theme = saved === "light" || saved === "dark"
+            ? saved
+            : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+          document.documentElement.dataset.theme = theme;
+          var accent = localStorage.getItem("rill.accent");
+          document.documentElement.dataset.accent =
+            accent === "blue" || accent === "purple" || accent === "orange" || accent === "rose"
+              || accent === "teal" || accent === "indigo" || accent === "pink" || accent === "amber"
+              ? accent
+              : "blue";
+        } catch (error) {
+          document.documentElement.dataset.theme = "light";
+          document.documentElement.dataset.accent = "blue";
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>Rill 需要启用 JavaScript 才能运行。</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

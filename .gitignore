@@ -1,0 +1,16 @@
+# 构建产物与本地状态
+/lzc-dist/
+/.lzc-build/
+/.lzc-cli-build*/
+/*.lpk
+server/data/
+server/cache/
+server/rill
+
+# 懒猫微服打包相关文件（不随公开仓库发布）
+/package.yml
+/lzc-manifest.yml
+/lzc-build.yml
+/lzc/
+/lzc-icon.png
+/AGENTS.md
