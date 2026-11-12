@@ -4,7 +4,7 @@
 
 [English](README.en.md) · [更新日志](CHANGELOG.md) · [订阅源实现登记](docs/RSS-SOURCES.md)
 
-![Rill 三栏阅读](designs/rill-prototype/screenshots/03-三栏阅读-桌面.png)
+![Rill 三栏阅读](docs/assets/screenshot-reading.png)
 
 Rill 是一个自托管的统一订阅入口。标准 RSS / Atom / JSON Feed、X、微信公众号、
 Bluesky、RSSHub、Apple Podcasts、小宇宙，收敛到同一套源管理、阅读与输出层；

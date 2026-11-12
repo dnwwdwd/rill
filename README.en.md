@@ -4,7 +4,7 @@
 
 [中文](README.md) · [Changelog](CHANGELOG.md) · [Source registry](docs/RSS-SOURCES.md)
 
-![Rill three-column reader](designs/rill-prototype/screenshots/03-三栏阅读-桌面.png)
+![Rill three-column reader](docs/assets/screenshot-reading.png)
 
 Rill is a self-hosted unified subscription inbox. RSS / Atom / JSON Feed, X,
 WeChat official accounts, Bluesky, RSSHub, Apple Podcasts and Xiaoyuzhou all
