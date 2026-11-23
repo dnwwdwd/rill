@@ -1,12 +1,26 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mockApi } from '@/api/mock/mockApi';
 import { useReaderStore } from '@/stores/readerStore';
+import { loadLastItemId, loadReaderFilter } from '@/utils/readerPersistence';
 
 describe('readerStore list filters', () => {
   beforeEach(async () => {
     window.sessionStorage.clear();
     await mockApi.signIn?.();
     useReaderStore.getState().reset();
+  });
+
+  it('persists the selected source and last opened article across reloads', async () => {
+    useReaderStore.getState().setFilter({ type: 'source', sourceId: 27 });
+    useReaderStore.getState().setReadFilter('unread');
+    expect(loadReaderFilter()).toEqual({ type: 'source', sourceId: 27 });
+
+    await useReaderStore.getState().loadDetail(1);
+    expect(loadLastItemId()).toBe(1);
+
+    useReaderStore.getState().reset();
+    expect(loadReaderFilter()).toEqual({ type: 'inbox' });
+    expect(loadLastItemId()).toBeNull();
   });
 
   it('sorts by published time and filters read status through the list query', async () => {

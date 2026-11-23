@@ -14,6 +14,52 @@ import { cx } from '@/utils/cx';
 
 type TestState = 'idle' | 'testing' | 'ok' | 'error';
 
+interface PromptFieldProps {
+  label: string;
+  value: string;
+  defaultValue: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}
+
+const PromptField = ({ label, value, defaultValue, disabled, onChange }: PromptFieldProps) => {
+  const [showDefault, setShowDefault] = useState(false);
+  return (
+    <Row label={label}>
+      <div className="st-prompt">
+        <textarea
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={defaultValue}
+          aria-label={`${label}提示词`}
+          maxLength={4000}
+          rows={3}
+          disabled={disabled}
+        />
+        <div className="st-prompt-actions">
+          <button
+            type="button"
+            className="st-prompt-link"
+            onClick={() => setShowDefault((current) => !current)}
+          >
+            {showDefault ? '收起默认' : '查看默认'}
+          </button>
+          <button
+            type="button"
+            className="st-prompt-link"
+            disabled={!value}
+            onClick={() => onChange('')}
+          >
+            恢复默认
+          </button>
+          {value ? <span className="st-dim">已自定义</span> : <span className="st-dim">留空使用默认</span>}
+        </div>
+        {showDefault ? <pre className="st-prompt-default">{defaultValue}</pre> : null}
+      </div>
+    </Row>
+  );
+};
+
 export const AiSettings = () => {
   const settings = useSettingsStore((state) => state.settings);
   const update = useSettingsStore((state) => state.update);
@@ -146,6 +192,38 @@ export const AiSettings = () => {
           hint={`本月累计 ${formatTokenCount(ai.tokens_month)} 令牌`}
           control={<strong className="st-meter-value">{ai.used_today} 次</strong>}
         />
+      </RowGroup>
+
+      <RowGroup title="提示词" className={cx(!ai.enabled && 'is-disabled')}>
+        <PromptField
+          label="要点列表"
+          value={ai.prompts.summary_bullets}
+          defaultValue={ai.prompt_defaults.summary_bullets}
+          disabled={!ai.enabled}
+          onChange={(value) => update({ ai: { prompts: { summary_bullets: value } } })}
+        />
+        <PromptField
+          label="一句话"
+          value={ai.prompts.summary_one}
+          defaultValue={ai.prompt_defaults.summary_one}
+          disabled={!ai.enabled}
+          onChange={(value) => update({ ai: { prompts: { summary_one: value } } })}
+        />
+        <PromptField
+          label="报告分批"
+          value={ai.prompts.digest_batch}
+          defaultValue={ai.prompt_defaults.digest_batch}
+          disabled={!ai.enabled}
+          onChange={(value) => update({ ai: { prompts: { digest_batch: value } } })}
+        />
+        <PromptField
+          label="报告简报"
+          value={ai.prompts.digest_merge}
+          defaultValue={ai.prompt_defaults.digest_merge}
+          disabled={!ai.enabled}
+          onChange={(value) => update({ ai: { prompts: { digest_merge: value } } })}
+        />
+        <Row hint="关注源 AI 总结复用摘要与报告分批提示词；修改只影响之后生成的内容。" />
       </RowGroup>
 
       <RowGroup title="翻译" className={cx(!ai.enabled && 'is-disabled')}>

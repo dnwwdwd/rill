@@ -23,6 +23,7 @@ export const AppLayout = () => {
   const loadSources = useSourcesStore((state) => state.load);
   const loadStats = useReaderStore((state) => state.loadStats);
   const notify = useUiStore((state) => state.notify);
+  const authStatus = useAuthStore((state) => state.status);
   useAppTheme(settings);
 
   useEffect(() => {
@@ -30,6 +31,23 @@ export const AppLayout = () => {
     void loadSources();
     void loadStats();
   }, [loadSettings, loadSources, loadStats]);
+
+  // 关注源的未读 dot 依赖源列表的 unread_count；定时抓取发生在服务端，
+  // 页面需要轻量轮询才能在保持打开时看到新 dot。
+  useEffect(() => {
+    if (authStatus !== 'authenticated') return;
+    const refresh = () => {
+      if (document.visibilityState !== 'visible') return;
+      void useSourcesStore.getState().load(true);
+      void useReaderStore.getState().loadStats();
+    };
+    const timer = window.setInterval(refresh, 60_000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [authStatus]);
 
   useEffect(() => {
     const onUnauthorized = () => {

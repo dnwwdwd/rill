@@ -13,7 +13,9 @@ interface SettingsState {
   error: string | null;
   load: (force?: boolean) => Promise<void>;
   update: (patch: SettingsPatch) => void;
+  saveNow: () => Promise<void>;
   saveAiKey: (apiKey: string) => Promise<boolean>;
+  saveEmailPassword: (accountId: string, password: string | null) => Promise<boolean>;
   setTheme: (theme: Settings['reader']['theme']) => void;
   setWechatEnabled: (enabled: boolean) => Promise<void>;
   startWereadScan: () => Promise<string>;
@@ -28,12 +30,19 @@ interface SettingsState {
 
 const mergePatch = (left: SettingsPatch, right: SettingsPatch): SettingsPatch => ({
   reader: { ...left.reader, ...right.reader },
-  ai: { ...left.ai, ...right.ai },
+  ai: {
+    ...left.ai,
+    ...right.ai,
+    ...(left.ai?.prompts || right.ai?.prompts
+      ? { prompts: { ...left.ai?.prompts, ...right.ai?.prompts } }
+      : {}),
+  },
   wechat: { ...left.wechat, ...right.wechat },
   backup: { ...left.backup, ...right.backup },
   feed: { ...left.feed, ...right.feed },
   security: { ...left.security, ...right.security },
   mcp: { ...left.mcp, ...right.mcp },
+  email: { ...left.email, ...right.email },
 });
 
 export const applySettingsToDocument = (settings: Settings) => {
@@ -66,7 +75,36 @@ let saveTimer: number | undefined;
 let pendingPatch: SettingsPatch = {};
 let revision = 0;
 
-export const useSettingsStore = create<SettingsState>((set, get) => ({
+export const useSettingsStore = create<SettingsState>((set, get) => {
+  const flushPending = async () => {
+    window.clearTimeout(saveTimer);
+    saveTimer = undefined;
+    const patchToSave = pendingPatch;
+    pendingPatch = {};
+    if (Object.keys(patchToSave).length === 0) return;
+    const currentRevision = revision;
+    try {
+      const saved = await api.updateSettings(patchToSave);
+      if (revision === currentRevision) {
+        set({ settings: saved, saving: false });
+      } else {
+        set({ saving: false });
+      }
+      // 邮件配置变化会影响源名称/分组/轮询：保存后立即刷新订阅源树，
+      // 不要求用户刷新页面。
+      const emailPatch = patchToSave.email;
+      const affectsSources = emailPatch
+        && ['enabled', 'accounts', 'password'].some((key) => key in emailPatch);
+      if (affectsSources) {
+        await useSourcesStore.getState().load(true);
+      }
+    } catch (error) {
+      set({ saving: false, error: error instanceof Error ? error.message : '设置保存失败' });
+      useUiStore.getState().notify('设置保存失败，请检查后端连接');
+    }
+  };
+
+  return {
   settings: DEFAULT_SETTINGS,
   loading: false,
   saving: false,
@@ -92,28 +130,18 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   update: (patch) => {
     if (!patch) return;
     revision += 1;
-    const currentRevision = revision;
     const next = mergeSettings(get().settings, patch);
     set({ settings: next, saving: true, error: null });
     applySettingsToDocument(next);
     pendingPatch = mergePatch(pendingPatch, patch);
     window.clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(async () => {
-      const patchToSave = pendingPatch;
-      pendingPatch = {};
-      try {
-        const saved = await api.updateSettings(patchToSave);
-        if (revision === currentRevision) {
-          set({ settings: saved, saving: false });
-        } else {
-          set({ saving: false });
-        }
-      } catch (error) {
-        set({ saving: false, error: error instanceof Error ? error.message : '设置保存失败' });
-        useUiStore.getState().notify('设置保存失败，请检查后端连接');
-      }
-    }, 350);
+    saveTimer = window.setTimeout(() => { void flushPending(); }, 350);
   },
+
+  // Flush the debounced PATCH immediately. Used after a successful email
+  // connection test so the source tree reflects new grouping/errors right away
+  // instead of waiting for a page refresh.
+  saveNow: flushPending,
 
   saveAiKey: async (apiKey) => {
     set({ saving: true });
@@ -125,6 +153,23 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     } catch (error) {
       set({ saving: false });
       useUiStore.getState().notify(error instanceof Error ? error.message : '密钥保存失败');
+      return false;
+    }
+  },
+
+  // REQ-041：授权码只写不读，保存/清除成功后以后端返回的 password_set 为准。
+  saveEmailPassword: async (accountId, password) => {
+    set({ saving: true });
+    try {
+      const saved = await api.saveEmailPassword(accountId, password);
+      set({ settings: saved, saving: false });
+      // 授权码变化可能触发邮件源创建/恢复，源树立即刷新。
+      await useSourcesStore.getState().load(true);
+      useUiStore.getState().notify(password == null ? '授权码已清除' : '授权码已加密保存');
+      return true;
+    } catch (error) {
+      set({ saving: false });
+      useUiStore.getState().notify(error instanceof Error ? error.message : '授权码保存失败');
       return false;
     }
   },
@@ -208,4 +253,5 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     set({ settings: next, loading: false, saving: false, loaded: false, error: null });
     applySettingsToDocument(next);
   },
-}));
+  };
+});

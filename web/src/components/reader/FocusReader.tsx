@@ -47,6 +47,7 @@ export const FocusReader = ({ itemId, onBack }: FocusReaderProps) => {
   const toggleLater = useReaderStore((state) => state.toggleLater);
   const toggleRead = useReaderStore((state) => state.toggleRead);
   const markRead = useReaderStore((state) => state.markRead);
+  const allowEmailImages = useReaderStore((state) => state.allowEmailImages);
   const settings = useSettingsStore((state) => state.settings);
   const sources = useSourcesStore((state) => state.sources);
   const notify = useUiStore((state) => state.notify);
@@ -63,6 +64,7 @@ export const FocusReader = ({ itemId, onBack }: FocusReaderProps) => {
   const ready = Boolean(detail);
   const loading = useReaderStore((state) => state.detailLoading[itemId]);
   const source = sources.find((entry) => entry.id === detail?.source_id);
+  const isEmail = Boolean(detail?.source_feed_url?.startsWith('imap://'));
   const speech = useSpeech(detail?.content_text ?? '');
   const getQuote = () => {
     const selection = window.getSelection();
@@ -405,16 +407,20 @@ export const FocusReader = ({ itemId, onBack }: FocusReaderProps) => {
               <div className="article-bilingual">
                 <div className="article-column">
                   <span className="article-column-label">译文</span>
-                  <ArticleContent html={translation.content_html} highlights={detail.notes} />
+                  <ArticleContent html={translation.content_html} highlights={detail.notes} isEmail={isEmail} senderEmail={detail.sender_email} imagesAllowed={detail.email_images_allowed} onAllowImages={() => { void allowEmailImages(detail.id); }} />
                 </div>
                 <div className="article-column">
                   <span className="article-column-label">原文</span>
-                  <ArticleContent html={detail.content_html} highlights={detail.notes} />
+                  <ArticleContent html={detail.content_html} highlights={detail.notes} isEmail={isEmail} senderEmail={detail.sender_email} />
                 </div>
               </div>
             ) : (
               <ArticleContent
                 html={translation && translationMode === 'translated' ? translation.content_html : detail.content_html}
+                isEmail={isEmail}
+                senderEmail={detail.sender_email}
+                imagesAllowed={detail.email_images_allowed}
+                onAllowImages={() => { void allowEmailImages(detail.id); }}
               />
             )}
 

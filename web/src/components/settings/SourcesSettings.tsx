@@ -41,6 +41,8 @@ const sourceKind = (source: SourceView) => {
   if (bestBlogsKind === 'podcast') return { tone: 'neutral' as const, icon: 'rss' as const, label: '小宇宙' };
   if (bestBlogsKind === 'youtube') return { tone: 'neutral' as const, icon: 'rss' as const, label: 'YouTube' };
   if (source.feed_url.startsWith('xiaoyuzhou://')) return { tone: 'neutral' as const, icon: 'rss' as const, label: '小宇宙' };
+  // REQ-041：IMAP 邮箱同步源。
+  if (source.feed_url.startsWith('imap://')) return { tone: 'neutral' as const, icon: 'mail' as const, label: '邮件' };
   // 存量微博源已停用（迁移 6），保留类型标签方便识别后手动删除。
   if (source.feed_url.startsWith('weibo://')) return { tone: 'neutral' as const, icon: 'at-sign' as const, label: '微博' };
   return { tone: 'neutral' as const, icon: 'rss' as const, label: 'RSS' };
@@ -506,6 +508,7 @@ const SourceItem = ({
             onChange={onToggle}
             label={source.enabled ? `暂停 ${source.name}` : `启用 ${source.name}`}
           />
+          <IconButton icon="activity" label={`查看 ${source.name} 详情`} size={15} onClick={onOpen} />
           <IconButton icon="pencil" label={`编辑或移动 ${source.name}`} size={15} onClick={onEdit} />
           <IconButton icon="refresh" label="立即刷新" size={15} onClick={onRefresh} />
           {confirming ? (

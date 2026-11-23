@@ -11,6 +11,7 @@ import type {
   Source,
   Translation,
 } from '@/api/types';
+import { DEFAULT_AI_PROMPTS, EMPTY_AI_PROMPTS } from '@/utils/aiPrompts';
 
 export interface SeedItem {
   id: number;
@@ -36,6 +37,8 @@ export interface SeedItem {
   podcast_duration_seconds?: number;
   summary?: AiSummary;
   translation?: Translation;
+  /** 邮件条目允许远程图片后为 true；mock 只在内存/本地演示中保持。 */
+  email_images_allowed?: boolean;
   /** 被过滤规则隐藏的时间；null/undefined = 正常可见。 */
   hidden_at?: string | null;
 }
@@ -95,6 +98,7 @@ export const seedSources: Source[] = [
     backfill_mode: 'window',
     last_fetch_at: minutesAgo(2), last_new_item_at: minutesAgo(18), next_fetch_at: minutesFromNow(28),
     last_status: 'ok', last_error: null, fail_count: 0, item_count: 128, unread_count: 0, icon_url: null,
+    watch_enabled: true, watch_mode: 'batch', watch_ai: true, watch_channel_ids: [1],
   },
   {
     id: 2, kind: 'rss', name: '阮一峰的网络日志', feed_url: 'https://ruanyf.github.io/feed.xml', site_url: 'https://www.ruanyifeng.com',
@@ -493,6 +497,7 @@ export const seedSettings: Settings = {
     rail_width: 224,
     list_width: 384,
     views: [],
+    pinned_sources: [1],
   },
   ai: {
     enabled: true,
@@ -505,6 +510,8 @@ export const seedSettings: Settings = {
     used_today: 34,
     tokens_month: 1_200_000,
     consent: true,
+    prompts: { ...EMPTY_AI_PROMPTS },
+    prompt_defaults: DEFAULT_AI_PROMPTS,
   },
   wechat: {
     enabled: true,
@@ -526,6 +533,12 @@ export const seedSettings: Settings = {
   mcp: {
     enabled: true,
     endpoint: '/mcp',
+  },
+  email: {
+    enabled: false,
+    block_remote_images: true,
+    trusted_senders: [],
+    accounts: [],
   },
 };
 
@@ -663,6 +676,7 @@ export const createSeedData = (): SeedData => ({
     feed: { ...seedSettings.feed },
     security: { ...seedSettings.security },
     mcp: { ...seedSettings.mcp },
+    email: { ...seedSettings.email },
   },
   channels: seedChannels.map((channel) => ({ ...channel })),
   digestRules: seedDigestRules.map((rule) => ({ ...rule, scope: [...rule.scope], channel_ids: [...rule.channel_ids] })),

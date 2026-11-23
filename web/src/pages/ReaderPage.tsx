@@ -11,6 +11,11 @@ import { useReaderStore } from '@/stores/readerStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useSourcesStore } from '@/stores/sourcesStore';
 import { cx } from '@/utils/cx';
+import { loadLastItemId } from '@/utils/readerPersistence';
+
+// Only restore the last article once per full page load. SPA navigation back
+// to "/" (e.g. clicking a source) must stay on the list.
+let restoredLastArticle = false;
 
 export const ReaderPage = () => {
   const params = useParams<{ itemId?: string }>();
@@ -21,13 +26,18 @@ export const ReaderPage = () => {
   const filter = useReaderStore((state) => state.filter);
   const query = useReaderStore((state) => state.query);
   const setQuery = useReaderStore((state) => state.setQuery);
+  const setFilter = useReaderStore((state) => state.setFilter);
   const readFilter = useReaderStore((state) => state.readFilter);
   const loadItems = useReaderStore((state) => state.loadItems);
+  const loadDetail = useReaderStore((state) => state.loadDetail);
   const details = useReaderStore((state) => state.details);
   const toggleRead = useReaderStore((state) => state.toggleRead);
   const markRead = useReaderStore((state) => state.markRead);
   const toggleStar = useReaderStore((state) => state.toggleStar);
   const refreshSource = useSourcesStore((state) => state.refresh);
+  const sources = useSourcesStore((state) => state.sources);
+  const folders = useSourcesStore((state) => state.folders);
+  const sourcesLoaded = useSourcesStore((state) => state.loaded);
   const theme = useSettingsStore((state) => state.settings.reader.theme);
   const autoRead = useSettingsStore((state) => state.settings.reader.auto_read);
   const setTheme = useSettingsStore((state) => state.setTheme);
@@ -44,6 +54,26 @@ export const ReaderPage = () => {
   useEffect(() => {
     void loadItems(true);
   }, [filter, debouncedQuery, readFilter, loadItems]);
+
+  useEffect(() => {
+    if (restoredLastArticle) return;
+    restoredLastArticle = true;
+    if (selectedId) return;
+    const lastId = loadLastItemId();
+    if (!lastId) return;
+    void loadDetail(lastId).then((detail) => {
+      if (detail) navigate(`/items/${lastId}`, { replace: true });
+    });
+  }, [loadDetail, navigate, selectedId]);
+
+  useEffect(() => {
+    if (!sourcesLoaded) return;
+    if (filter.type === 'source' && !sources.some((source) => source.id === filter.sourceId)) {
+      setFilter({ type: 'inbox' });
+    } else if (filter.type === 'folder' && !folders.some((folder) => folder.id === filter.folderId)) {
+      setFilter({ type: 'inbox' });
+    }
+  }, [filter, folders, setFilter, sources, sourcesLoaded]);
 
   useEffect(() => {
     setSearchOpen(false);

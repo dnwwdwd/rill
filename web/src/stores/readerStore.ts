@@ -11,6 +11,14 @@ import type {
 import type { ReadStatusFilter, ReaderFilter, TranslationMode } from '@/types/ui';
 import { useSourcesStore } from '@/stores/sourcesStore';
 import { useUiStore } from '@/stores/uiStore';
+import {
+  clearReaderPersistence,
+  loadReadStatusFilter,
+  loadReaderFilter,
+  saveLastItemId,
+  saveReadStatusFilter,
+  saveReaderFilter,
+} from '@/utils/readerPersistence';
 
 interface ReaderState {
   filter: ReaderFilter;
@@ -40,6 +48,7 @@ interface ReaderState {
   toggleRead: (id: number) => Promise<void>;
   toggleStar: (id: number) => Promise<void>;
   toggleLater: (id: number) => Promise<void>;
+  allowEmailImages: (id: number) => Promise<void>;
   markRead: (id: number) => Promise<void>;
   markAllRead: (target: { source_id?: number; folder_id?: number }) => Promise<number>;
   markItemsRead: (ids: number[]) => Promise<number>;
@@ -90,9 +99,9 @@ const updateSummary = (items: ItemSummary[], summary: ItemSummary): ItemSummary[
 );
 
 export const useReaderStore = create<ReaderState>((set, get) => ({
-  filter: { type: 'inbox' },
+  filter: loadReaderFilter(),
   query: '',
-  readFilter: 'all',
+  readFilter: loadReadStatusFilter(),
   items: [],
   stats: { total: 0, unread: 0, starred: 0, read: 0, hidden: 0, later: 0 },
   nextCursor: null,
@@ -108,9 +117,15 @@ export const useReaderStore = create<ReaderState>((set, get) => ({
   summaryStream: {},
   translationStream: {},
 
-  setFilter: (filter) => set({ filter, query: '' }),
+  setFilter: (filter) => {
+    saveReaderFilter(filter);
+    set({ filter, query: '' });
+  },
   setQuery: (query) => set({ query }),
-  setReadFilter: (readFilter) => set({ readFilter }),
+  setReadFilter: (readFilter) => {
+    saveReadStatusFilter(readFilter);
+    set({ readFilter });
+  },
 
   loadItems: async (reset = true) => {
     const token = ++loadToken;
@@ -166,6 +181,7 @@ export const useReaderStore = create<ReaderState>((set, get) => ({
     set((state) => ({ detailLoading: { ...state.detailLoading, [id]: true } }));
     try {
       const detail = await api.getItem(id);
+      saveLastItemId(id);
       set((state) => ({
         details: { ...state.details, [id]: detail },
         detailLoading: { ...state.detailLoading, [id]: false },
@@ -271,6 +287,26 @@ export const useReaderStore = create<ReaderState>((set, get) => ({
         stats: { ...state.stats, later: Math.max(0, state.stats.later + (nextLater ? -1 : 1)) },
       }));
       useUiStore.getState().notify(error instanceof Error ? error.message : '稍后读更新失败');
+    }
+  },
+
+  allowEmailImages: async (id) => {
+    const detail = get().details[id];
+    if (!detail || detail.email_images_allowed) return;
+    set((state) => ({
+      details: state.details[id]
+        ? { ...state.details, [id]: { ...state.details[id], email_images_allowed: true } }
+        : state.details,
+    }));
+    try {
+      await api.setItemEmailImages(id, true);
+    } catch (error) {
+      set((state) => ({
+        details: state.details[id]
+          ? { ...state.details, [id]: { ...state.details[id], email_images_allowed: false } }
+          : state.details,
+      }));
+      useUiStore.getState().notify(error instanceof Error ? error.message : '图片放行状态保存失败');
     }
   },
 
@@ -523,6 +559,7 @@ export const useReaderStore = create<ReaderState>((set, get) => ({
 
   reset: () => {
     loadToken += 1;
+    clearReaderPersistence();
     set({
       filter: { type: 'inbox' },
       query: '',

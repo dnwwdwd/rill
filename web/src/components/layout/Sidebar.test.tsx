@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { createSeedData } from '@/api/mock/seed';
 import { api } from '@/api/client';
 import { Sidebar } from '@/components/layout/Sidebar';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { useSourcesStore } from '@/stores/sourcesStore';
 
 const seed = createSeedData();
@@ -17,6 +18,9 @@ const renderSidebar = () => render(
 afterEach(() => {
   act(() => {
     useSourcesStore.setState({ folders: [], sources: [], loaded: false, health: {} });
+    useSettingsStore.setState((state) => ({
+      settings: { ...state.settings, reader: { ...state.settings.reader, pinned_sources: [] } },
+    }));
   });
   vi.restoreAllMocks();
 });
@@ -72,6 +76,39 @@ describe('Sidebar source tree', () => {
     fireEvent.drop(folderRow, { dataTransfer });
 
     await waitFor(() => expect(update).toHaveBeenCalledWith(8, { folder_id: 1 }));
+  });
+
+  it('opens the watch dialog from the source context menu', async () => {
+    useSourcesStore.setState({ folders: seed.folders, sources: seed.sources, loaded: true });
+    renderSidebar();
+
+    const sourceRow = screen.getByText('InfoQ 中文').closest('.source-row');
+    expect(sourceRow).not.toBeNull();
+    fireEvent.contextMenu(sourceRow!);
+    fireEvent.click(screen.getByRole('menuitem', { name: '关注订阅源' }));
+
+    expect(await screen.findByRole('heading', { name: '关注订阅源' })).toBeInTheDocument();
+  });
+
+  it('shows pinned watched sources in a global section with a dot', () => {
+    act(() => {
+      useSettingsStore.setState((state) => ({
+        settings: { ...state.settings, reader: { ...state.settings.reader, pinned_sources: [1] } },
+      }));
+    });
+    useSourcesStore.setState({
+      folders: seed.folders,
+      sources: seed.sources.map((source) => (
+        source.id === 1 ? { ...source, watch_enabled: true, unread_count: 3 } : source
+      )),
+      loaded: true,
+    });
+    renderSidebar();
+
+    expect(screen.getByText('置顶')).toBeInTheDocument();
+    const sourceRow = screen.getByText('少数派').closest('.source-row');
+    expect(sourceRow).not.toBeNull();
+    expect(sourceRow?.querySelector('.source-watch-dot')).not.toBeNull();
   });
 
   it('filters the tree and enters multi-select with Ctrl/Cmd click', () => {

@@ -2,6 +2,7 @@ import { useNavigate } from 'react-router-dom';
 import { MobileTopbar } from '@/components/layout/MobileTopbar';
 import { IconButton, SourceIcon } from '@/components/ui';
 import { useReaderStore } from '@/stores/readerStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { useSourcesStore } from '@/stores/sourcesStore';
 import { flattenFolders } from '@/utils/folders';
 import { cx } from '@/utils/cx';
@@ -10,9 +11,15 @@ export const MobileSourcesPage = () => {
   const navigate = useNavigate();
   const sources = useSourcesStore((state) => state.sources);
   const folders = useSourcesStore((state) => state.folders);
+  const pinnedIds = useSettingsStore((state) => state.settings.reader.pinned_sources ?? []);
   const filter = useReaderStore((state) => state.filter);
   const setFilter = useReaderStore((state) => state.setFilter);
   const nodes = flattenFolders(folders);
+  const pinnedSet = new Set(pinnedIds);
+  const pinnedSources = pinnedIds
+    .map((id) => sources.find((source) => source.id === id))
+    .filter((source): source is (typeof sources)[number] => Boolean(source));
+  const unpinnedSources = sources.filter((source) => !pinnedSet.has(source.id));
 
   const openSource = (sourceId: number) => {
     setFilter({ type: 'source', sourceId });
@@ -39,6 +46,9 @@ export const MobileSourcesPage = () => {
       >
         <SourceIcon source={source} size={20} />
         <span className="mobile-source-name">{source.name}</span>
+        {source.watch_enabled && source.unread_count > 0 ? (
+          <span className="source-watch-dot" title="关注源有新内容" aria-label="关注源有新内容" />
+        ) : null}
         {count > 0 ? (
           <span className={cx('mobile-source-count', source.kind === 'wechat' && 'is-total')}>{count}</span>
         ) : null}
@@ -49,10 +59,10 @@ export const MobileSourcesPage = () => {
   const grouped = nodes
     .map((node) => ({
       node,
-      rows: sources.filter((source) => source.folder_id === node.folder.id),
+      rows: unpinnedSources.filter((source) => source.folder_id === node.folder.id),
     }))
     .filter((entry) => entry.rows.length > 0);
-  const orphans = sources.filter((source) => source.folder_id == null);
+  const orphans = unpinnedSources.filter((source) => source.folder_id == null);
 
   return (
     <div className="mobile-sources-page">
@@ -68,11 +78,21 @@ export const MobileSourcesPage = () => {
         )}
       />
       <div className="mobile-sources-scroll">
-        {grouped.length === 0 && orphans.length === 0 ? (
+        {pinnedSources.length === 0 && grouped.length === 0 && orphans.length === 0 ? (
           <div className="mobile-sources-empty">
             <p>还没有订阅源</p>
             <button type="button" onClick={() => navigate('/settings/sources')}>去添加</button>
           </div>
+        ) : null}
+
+        {pinnedSources.length > 0 ? (
+          <section className="mobile-source-group">
+            <div className="mobile-source-folder is-static">
+              <span>置顶</span>
+              <span className="mobile-source-folder-count">{pinnedSources.length}</span>
+            </div>
+            {pinnedSources.map(renderSource)}
+          </section>
         ) : null}
 
         {grouped.map(({ node, rows }) => (

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { api } from '@/api/client';
 import { AutomationSettings } from '@/components/settings/AutomationSettings';
 
@@ -29,6 +29,7 @@ vi.mock('@/api/client', () => ({
     getFolders: vi.fn().mockResolvedValue([]),
     getSources: vi.fn().mockResolvedValue([]),
     getReaderStats: vi.fn().mockResolvedValue({ hidden: 0 }),
+    updateSource: vi.fn(),
   },
 }));
 
@@ -69,6 +70,107 @@ describe('AutomationSettings', () => {
     fireEvent.click(screen.getByRole('button', { name: '编辑 日报' }));
 
     expect(screen.getByLabelText('规则名称')).toHaveValue('日报');
+  });
+
+  it('lists watched sources and opens the watch dialog', async () => {
+    vi.mocked(api.getSources).mockResolvedValue([
+      {
+        ...makeSource(11, 0),
+        watch_enabled: true,
+        watch_mode: 'batch',
+        watch_ai: true,
+        watch_channel_ids: [],
+      },
+    ]);
+
+    render(<AutomationSettings />);
+
+    await screen.findByText('关注订阅源');
+    expect(screen.getByText('源 11')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '设置 源 11 的关注提醒' }));
+    expect(await screen.findByRole('heading', { name: '关注设置' })).toBeInTheDocument();
+  });
+
+  it('batch edits selected watched sources', async () => {
+    vi.mocked(api.getSources).mockResolvedValue([
+      {
+        ...makeSource(11, 0),
+        watch_enabled: true,
+        watch_mode: 'batch',
+        watch_ai: false,
+        watch_channel_ids: [],
+      },
+      {
+        ...makeSource(12, 0),
+        watch_enabled: true,
+        watch_mode: 'each',
+        watch_ai: true,
+        watch_channel_ids: [],
+      },
+    ]);
+
+    render(<AutomationSettings />);
+    await screen.findByText('源 11');
+
+    fireEvent.click(screen.getByRole('button', { name: '批量管理' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 源 11' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 源 12' }));
+    expect(screen.getByText('已选 2')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '提醒设置' }));
+    expect(await screen.findByRole('heading', { name: '批量关注设置' })).toBeInTheDocument();
+    expect(screen.getAllByText('2 个订阅源').length).toBeGreaterThan(0);
+  });
+
+  it('batch removes watch status from selected sources', async () => {
+    const sources = [
+      { ...makeSource(11, 0), watch_enabled: true },
+      { ...makeSource(12, 0), watch_enabled: true },
+    ];
+    vi.mocked(api.getSources).mockResolvedValue(sources);
+    vi.mocked(api.updateSource).mockImplementation(async (id, patch) => ({
+      ...sources.find((source) => source.id === id)!,
+      ...patch,
+    }));
+
+    render(<AutomationSettings />);
+    await screen.findByText('源 11');
+
+    fireEvent.click(screen.getByRole('button', { name: '批量管理' }));
+    fireEvent.click(screen.getByRole('button', { name: '全选' }));
+    fireEvent.click(screen.getByRole('button', { name: '取消关注' }));
+
+    await waitFor(() => {
+      expect(api.updateSource).toHaveBeenCalledWith(11, { watch_enabled: false });
+      expect(api.updateSource).toHaveBeenCalledWith(12, { watch_enabled: false });
+    });
+  });
+
+  it('selects multiple sources at once when adding watch sources', async () => {
+    const sources = [
+      { ...makeSource(11, 0), watch_enabled: false },
+      { ...makeSource(12, 0), watch_enabled: false },
+    ];
+    vi.mocked(api.getSources).mockResolvedValue(sources);
+    vi.mocked(api.updateSource).mockImplementation(async (id, patch) => ({
+      ...sources.find((source) => source.id === id)!,
+      ...patch,
+      watch_enabled: Boolean(patch.watch_enabled),
+    }));
+
+    render(<AutomationSettings />);
+    await screen.findByText(/还没有关注源/);
+
+    fireEvent.click(screen.getByRole('button', { name: '添加关注源' }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: '选择 源 11' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: '选择 源 12' }));
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await waitFor(() => {
+      expect(api.updateSource).toHaveBeenCalledWith(11, expect.objectContaining({ watch_enabled: true }));
+      expect(api.updateSource).toHaveBeenCalledWith(12, expect.objectContaining({ watch_enabled: true }));
+    });
   });
 
   it('does not repeat the source count for folder-only scopes', async () => {

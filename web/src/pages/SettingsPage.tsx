@@ -5,6 +5,7 @@ import { MobileTopbar } from '@/components/layout/MobileTopbar';
 import { SourcesSettings } from '@/components/settings/SourcesSettings';
 import { ReadingSettings } from '@/components/settings/ReadingSettings';
 import { AiSettings } from '@/components/settings/AiSettings';
+import { EmailSettings } from '@/components/settings/EmailSettings';
 import { AutomationSettings } from '@/components/settings/AutomationSettings';
 import { McpSettings } from '@/components/settings/McpSettings';
 import { BackupSettings } from '@/components/settings/BackupSettings';
@@ -20,6 +21,7 @@ const sections: Record<SettingsSection, () => React.JSX.Element> = {
   sources: SourcesSettings,
   reading: ReadingSettings,
   ai: AiSettings,
+  email: EmailSettings,
   automation: AutomationSettings,
   mcp: McpSettings,
   backup: BackupSettings,

@@ -26,6 +26,7 @@ describe('SourcesSettings tree', () => {
 
     expect(screen.getByText('技术')).toBeInTheDocument();
     expect(screen.getByText('少数派')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '查看 少数派 详情' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '编辑或移动 少数派' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '删除 少数派' })).toBeInTheDocument();
 

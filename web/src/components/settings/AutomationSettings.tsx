@@ -16,9 +16,12 @@ import type {
   ReaderStats,
   RuleScope,
   Source,
+  WatchMode,
 } from '@/api/types';
 import { Button, IconButton, Icon, Modal, Segmented, SourceIcon, Switch } from '@/components/ui';
 import { RowGroup, Row } from '@/components/settings/SettingsSection';
+import { WatchSourceDialog } from '@/components/sources/WatchSourceDialog';
+import { useSourcesStore } from '@/stores/sourcesStore';
 import { useUiStore } from '@/stores/uiStore';
 import { cx } from '@/utils/cx';
 import { renderMarkdown } from '@/utils/markdown';
@@ -42,6 +45,11 @@ const FILTER_MATCH_LABELS: Record<FilterMatchField, string> = {
 const FILTER_ACTION_LABELS: Record<FilterAction, string> = {
   mark_read: '标记已读',
   hide: '隐藏',
+};
+
+const WATCH_MODE_LABELS: Record<WatchMode, string> = {
+  batch: '合并一条',
+  each: '每篇一条',
 };
 
 const REPORT_STATUS_LABELS: Record<DigestReport['status'], string> = {
@@ -349,6 +357,19 @@ export const AutomationSettings = () => {
   const [hiddenItems, setHiddenItems] = useState<Array<{ id: number; title: string; source: { name: string } }>>([]);
   const [hiddenLoading, setHiddenLoading] = useState(false);
 
+  const [watchDialog, setWatchDialog] = useState<{
+    open: boolean;
+    sourceIds: number[];
+    picker: boolean;
+  }>({
+    open: false,
+    sourceIds: [],
+    picker: false,
+  });
+  const [watchSelectMode, setWatchSelectMode] = useState(false);
+  const [watchSelected, setWatchSelected] = useState<Set<number>>(new Set());
+  const [watchBusy, setWatchBusy] = useState(false);
+
   const ruleFormRef = useRef<HTMLDivElement>(null);
   const filterFormRef = useRef<HTMLDivElement>(null);
   const channelFormRef = useRef<HTMLDivElement>(null);
@@ -637,6 +658,70 @@ export const AutomationSettings = () => {
     () => (reportDetail ? renderMarkdown(reportDetail.content_md) : ''),
     [reportDetail],
   );
+  const watchedSources = sources.filter((source) => source.watch_enabled);
+
+  const openWatchDialog = (sourceIds: number[], picker = false) => {
+    setWatchDialog({ open: true, sourceIds, picker });
+  };
+
+  const exitWatchSelect = () => {
+    setWatchSelectMode(false);
+    setWatchSelected(new Set());
+  };
+
+  const enterWatchSelect = () => {
+    setWatchSelectMode(true);
+    setWatchSelected(new Set());
+  };
+
+  const toggleWatchSelected = (id: number) => {
+    setWatchSelected((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAllWatched = () => {
+    setWatchSelected(new Set(watchedSources.map((source) => source.id)));
+  };
+
+  const disableWatchBatch = async () => {
+    if (watchSelected.size === 0 || watchBusy) return;
+    setWatchBusy(true);
+    let failed = 0;
+    for (const id of watchSelected) {
+      try {
+        await api.updateSource(id, { watch_enabled: false });
+      } catch {
+        failed += 1;
+      }
+    }
+    await useSourcesStore.getState().load(true);
+    try {
+      setSources(await api.getSources());
+    } catch {
+      // 列表刷新失败时保留旧数据，操作结果仍以通知为准。
+    }
+    setWatchBusy(false);
+    if (failed > 0) {
+      notify(`${failed} 个源取消关注失败`);
+      return;
+    }
+    notify(`已取消关注 ${watchSelected.size} 个源`);
+    setWatchSelected(new Set());
+  };
+
+  const watchChannelSummary = (ids?: number[]): string => {
+    const selected = ids ?? [];
+    if (selected.length === 0) return '未选择渠道';
+    return selected.map((id) => {
+      const channel = channels.find((entry) => entry.id === id);
+      if (!channel) return '渠道已删除';
+      return channel.enabled ? channel.name : `${channel.name}（已停用）`;
+    }).join('、');
+  };
 
   if (loadError) {
     return (
@@ -648,6 +733,101 @@ export const AutomationSettings = () => {
 
   return (
     <>
+      <RowGroup title="关注订阅源">
+        {watchSelectMode ? (
+          <Row>
+            <div className="st-batch watch-batch-bar" role="toolbar" aria-label="关注源批量操作">
+              <span className="st-batch-count">已选 {watchSelected.size}</span>
+              <button
+                type="button"
+                className="st-batch-link"
+                onClick={selectAllWatched}
+                disabled={watchedSources.length === 0 || watchBusy}
+              >
+                全选
+              </button>
+              <button
+                type="button"
+                className="st-batch-link"
+                onClick={() => setWatchSelected(new Set())}
+                disabled={watchSelected.size === 0 || watchBusy}
+              >
+                清空
+              </button>
+              <Button
+                size="sm"
+                disabled={watchSelected.size === 0 || watchBusy}
+                onClick={() => openWatchDialog([...watchSelected])}
+              >
+                提醒设置
+              </Button>
+              <Button
+                size="sm"
+                variant="danger"
+                disabled={watchSelected.size === 0 || watchBusy}
+                onClick={() => { void disableWatchBatch(); }}
+              >
+                取消关注
+              </Button>
+              <span className="st-batch-spacer" />
+              <Button size="sm" onClick={exitWatchSelect}>取消选择</Button>
+            </div>
+          </Row>
+        ) : null}
+        {watchedSources.map((source) => (
+          <Row
+            key={source.id}
+            label={watchSelectMode ? (
+              <label className="watch-source-row-main is-selectable">
+                <input
+                  type="checkbox"
+                  className="watch-select-check"
+                  checked={watchSelected.has(source.id)}
+                  onChange={() => toggleWatchSelected(source.id)}
+                  aria-label={`选择 ${source.name}`}
+                />
+                <SourceIcon source={source} size={24} />
+                <span className="watch-source-row-name">{source.name}</span>
+              </label>
+            ) : (
+              <span className="watch-source-row-main">
+                <SourceIcon source={source} size={24} />
+                <span className="watch-source-row-name">{source.name}</span>
+              </span>
+            )}
+            hint={[
+              WATCH_MODE_LABELS[source.watch_mode === 'each' ? 'each' : 'batch'],
+              source.watch_ai ? 'AI 总结' : '仅标题',
+              watchChannelSummary(source.watch_channel_ids),
+            ].join(' · ')}
+            control={watchSelectMode ? undefined : (
+              <Button
+                size="sm"
+                aria-label={`设置 ${source.name} 的关注提醒`}
+                onClick={() => openWatchDialog([source.id])}
+              >
+                设置
+              </Button>
+            )}
+          />
+        ))}
+        {watchedSources.length === 0 ? (
+          <Row hint="还没有关注源。关注后，新文章会按设置推送到飞书/Webhook，并在源列表显示未读 dot。" />
+        ) : null}
+        {watchSelectMode ? null : (
+          <Row
+            control={(
+              <div className="watch-group-actions">
+                {watchedSources.length > 0 ? (
+                  <Button size="sm" icon="check" onClick={enterWatchSelect}>批量管理</Button>
+                ) : null}
+                <Button size="sm" icon="plus" onClick={() => openWatchDialog([], true)}>添加关注源</Button>
+              </div>
+            )}
+          />
+        )}
+      </RowGroup>
+
       <RowGroup title="报告规则">
         {rules.map((rule) => (
           <RuleRow
@@ -1075,6 +1255,19 @@ export const AutomationSettings = () => {
           <div className="st-auto-md" dangerouslySetInnerHTML={{ __html: reportMarkdown }} />
         ) : null}
       </Modal>
+
+      <WatchSourceDialog
+        open={watchDialog.open}
+        initialSourceIds={watchDialog.sourceIds}
+        picker={watchDialog.picker}
+        sources={sources}
+        onClose={() => setWatchDialog({ open: false, sourceIds: [], picker: false })}
+        onSaved={(updated) => {
+          const saved = new Map(updated.map((source) => [source.id, source]));
+          setSources((current) => current.map((source) => saved.get(source.id) ?? source));
+          setWatchSelected(new Set());
+        }}
+      />
     </>
   );
 };

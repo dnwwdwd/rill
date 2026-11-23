@@ -10,6 +10,8 @@ import type {
   DigestReport,
   DigestRule,
   DigestRuleInput,
+  EmailTestInput,
+  EmailTestResponse,
   FeedCandidate,
   FetchLog,
   FilterRule,
@@ -221,6 +223,7 @@ const httpClient: ApiClient = {
   },
   fetchItemFullText: (id) => request<ItemDetail>(`/items/${id}/fulltext`, { method: 'POST' }),
   patchItemState: (id, patch) => request<ItemSummary>(`/items/${id}/state`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  setItemEmailImages: (id, allowed) => request<{ email_images_allowed: boolean }>(`/items/${id}/email-images`, { method: 'PATCH', body: JSON.stringify({ allowed }) }),
   batchItemState: (ids, patch) => request<BatchStateResponse>('/items/state', { method: 'PATCH', body: JSON.stringify({ ids, ...patch }) }),
   getItemNotes: (id) => request<ItemNote[]>(`/items/${id}/notes`),
   createItemNote: (id, input) => request<ItemNote>(`/items/${id}/notes`, { method: 'POST', body: JSON.stringify(input) }),
@@ -289,6 +292,17 @@ const httpClient: ApiClient = {
   updateSettings: (patch: SettingsPatch) => request<Settings>('/settings', { method: 'PATCH', body: JSON.stringify(patch) }),
   saveAiKey: (apiKey) => request<Settings>('/settings', { method: 'PATCH', body: JSON.stringify({ ai: { api_key: apiKey } }) }),
   testAiConnection: () => request<AiTestResponse>('/settings/ai/test', { method: 'POST' }),
+  // REQ-041：授权码只写不读；按账号保存，null = 清除。
+  saveEmailPassword: (accountId: string, password: string | null) => request<Settings>('/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ email: { account_id: accountId, password } }),
+  }),
+  testEmailConnection: (input: EmailTestInput) => request<EmailTestResponse>('/settings/email/test', {
+    method: 'POST',
+    body: JSON.stringify(input),
+    // 后端 12s 内必然返回；15s 兜底中止，避免「正在测试」卡死。
+    signal: AbortSignal.timeout(15000),
+  }),
   generateSummary: (itemId) => request<AiSummary>(`/items/${itemId}/summary`, { method: 'POST' }),
   translateItem: (itemId) => request<Translation>(`/items/${itemId}/translation`, { method: 'POST' }),
   savePodcastProgress: (itemId, positionSeconds, durationSeconds) => request<void>(`/items/${itemId}/podcast-progress`, {

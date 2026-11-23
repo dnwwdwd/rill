@@ -9,6 +9,8 @@ import type {
   DigestReport,
   DigestRule,
   DigestRuleInput,
+  EmailTestInput,
+  EmailTestResponse,
   FeedCandidate,
   FetchLog,
   FilterRule,
@@ -124,9 +126,12 @@ const toDetail = (db: SeedData, item: SeedItem): ItemDetail => ({
   summary: item.summary ? clone(item.summary) : undefined,
   translation: item.translation ? clone(item.translation) : undefined,
   notes: item.notes ? clone(item.notes) : undefined,
+  email_images_allowed: item.email_images_allowed,
 });
 
-const sourceUnread = (db: SeedData, sourceId: number) => db.items.filter((item) => item.source_id === sourceId && !item.read_at).length;
+const sourceUnread = (db: SeedData, sourceId: number) => db.items.filter((item) => (
+  item.source_id === sourceId && !item.read_at && !item.hidden_at
+)).length;
 
 const publicSource = (db: SeedData, source: Source): Source => ({
   ...source,
@@ -158,14 +163,35 @@ const assertAuthed = () => {
   }
 };
 
+const mergeEmailSettings = (current: Settings['email'], patch: SettingsPatch['email']): Settings['email'] => {
+  if (!patch) return current;
+  const existing = new Map(current.accounts.map((account) => [account.id, account]));
+  return {
+    enabled: patch.enabled ?? current.enabled,
+    block_remote_images: patch.block_remote_images ?? current.block_remote_images,
+    trusted_senders: patch.trusted_senders ?? current.trusted_senders,
+    accounts: patch.accounts
+      ? patch.accounts.map((account) => ({
+        ...account,
+        password_set: account.password_set ?? existing.get(account.id)?.password_set ?? false,
+      }))
+      : current.accounts,
+  };
+};
+
 const deepMergeSettings = (current: Settings, patch: SettingsPatch): Settings => ({
   reader: { ...current.reader, ...patch.reader },
-  ai: { ...current.ai, ...patch.ai },
+  ai: {
+    ...current.ai,
+    ...patch.ai,
+    prompts: { ...current.ai.prompts, ...patch.ai?.prompts },
+  },
   wechat: { ...current.wechat, ...patch.wechat },
   backup: { ...current.backup, ...patch.backup },
   feed: { ...current.feed, ...patch.feed },
   security: { ...current.security, ...patch.security },
   mcp: { ...current.mcp, ...patch.mcp },
+  email: mergeEmailSettings(current.email, patch.email),
 });
 
 // REQ-036/037 mock 辅助：webhook URL 属于凭据，落库前就打码，任何返回都不含完整 URL。
@@ -369,6 +395,10 @@ export const createMockApi = (): ApiClient => {
       initial_limit: input.initial_limit ?? 100,
       backfill_mode: input.backfill_mode ?? 'window',
       full_text: input.full_text ?? false,
+      watch_enabled: input.watch_enabled ?? false,
+      watch_mode: input.watch_mode ?? 'batch',
+      watch_ai: input.watch_ai ?? false,
+      watch_channel_ids: input.watch_channel_ids ?? [],
       fallback_url: input.fallback_url ?? null,
       last_fetch_at: nowIso(),
       last_new_item_at: null,
@@ -637,13 +667,14 @@ export const createMockApi = (): ApiClient => {
     async getReaderStats(): Promise<ReaderStats> {
       assertAuthed();
       await delay(80);
+      const visible = db.items.filter((item) => !item.hidden_at);
       return {
-        total: db.items.length,
-        unread: db.items.filter((item) => !item.read_at).length,
-        starred: db.items.filter((item) => Boolean(item.starred_at)).length,
-        read: db.items.filter((item) => Boolean(item.read_at)).length,
+        total: visible.length,
+        unread: visible.filter((item) => !item.read_at).length,
+        starred: visible.filter((item) => Boolean(item.starred_at)).length,
+        read: visible.filter((item) => Boolean(item.read_at)).length,
         hidden: db.items.filter((item) => Boolean(item.hidden_at)).length,
-        later: db.items.filter((item) => Boolean(item.later_at)).length,
+        later: visible.filter((item) => Boolean(item.later_at)).length,
       };
     },
 
@@ -700,6 +731,15 @@ export const createMockApi = (): ApiClient => {
       if (patch.later !== undefined) item.later_at = patch.later ? nowIso() : null;
       if (patch.hidden !== undefined) item.hidden_at = patch.hidden ? nowIso() : null;
       return toSummary(db, item);
+    },
+
+    async setItemEmailImages(id: number, allowed: boolean): Promise<{ email_images_allowed: boolean }> {
+      assertAuthed();
+      await delay(80);
+      const item = db.items.find((entry) => entry.id === id);
+      if (!item) throw new ApiError(404, 'item_not_found', '条目不存在');
+      item.email_images_allowed = allowed;
+      return { email_images_allowed: allowed };
     },
 
     async batchItemState(ids: number[], patch: { read?: boolean; starred?: boolean; later?: boolean; hidden?: boolean }): Promise<BatchStateResponse> {
@@ -1181,6 +1221,24 @@ export const createMockApi = (): ApiClient => {
       assertAuthed();
       await delay(160);
       db.settings = deepMergeSettings(db.settings, patch);
+      // REQ-041：授权码只写不读 —— 命中 password 只更新对应账号的
+      // password_set，绝不回显。
+      const emailPatch = patch.email;
+      const password = emailPatch?.password;
+      const target = emailPatch?.account_id
+        ?? (db.settings.email.accounts.length === 1 ? db.settings.email.accounts[0].id : undefined);
+      if (password !== undefined && target) {
+        const account = db.settings.email.accounts.find((entry) => entry.id === target);
+        if (account) {
+          account.password_set = password !== null && String(password).trim().length > 0;
+        }
+      }
+      if (db.settings.email && 'password' in db.settings.email) {
+        delete (db.settings.email as { password?: unknown }).password;
+      }
+      if (emailPatch && 'account_id' in emailPatch) {
+        delete (db.settings.email as { account_id?: unknown }).account_id;
+      }
       persistSettings();
       return clone(db.settings);
     },
@@ -1199,6 +1257,35 @@ export const createMockApi = (): ApiClient => {
       await delay(820);
       if (!db.settings.ai.enabled) throw new ApiError(409, 'ai_disabled', 'AI 能力未启用');
       return { ok: true, latency_ms: 680 };
+    },
+
+    // REQ-041：邮箱同步 mock —— 授权码只存 password_set 状态，不保存真实值。
+    async saveEmailPassword(accountId: string, password: string | null): Promise<Settings> {
+      assertAuthed();
+      await delay(220);
+      if (typeof password === 'string' && !password.trim()) {
+        throw new ApiError(400, 'email_password_required', '授权码不能为空');
+      }
+      const account = db.settings.email.accounts.find((entry) => entry.id === accountId);
+      if (!account) throw new ApiError(404, 'email_account_not_found', '邮箱账号不存在');
+      account.password_set = password != null;
+      persistSettings();
+      return clone(db.settings);
+    },
+
+    async testEmailConnection(input: EmailTestInput): Promise<EmailTestResponse> {
+      assertAuthed();
+      await delay(820);
+      const account = input.account_id
+        ? db.settings.email.accounts.find((entry) => entry.id === input.account_id)
+        : undefined;
+      const host = input.host?.trim() || account?.host || '';
+      const username = input.username?.trim() || account?.username || '';
+      if (!host || !username) throw new ApiError(400, 'email_test_failed', '请填写 IMAP 服务器与邮箱账号');
+      if (!input.password?.trim() && !account?.password_set) {
+        throw new ApiError(400, 'email_test_failed', '请填写授权码');
+      }
+      return { ok: true, mailboxes: ['INBOX', 'Newsletter', 'Archive'] };
     },
 
     async generateSummary(itemId: number): Promise<AiSummary> {
@@ -1360,6 +1447,10 @@ export const createMockApi = (): ApiClient => {
         refresh_seconds: 1800,
         initial_limit: 20,
         backfill_mode: 'window',
+        watch_enabled: false,
+        watch_mode: 'batch',
+        watch_ai: false,
+        watch_channel_ids: [],
         fallback_url: null,
         last_fetch_at: nowIso(),
         last_new_item_at: nowIso(),

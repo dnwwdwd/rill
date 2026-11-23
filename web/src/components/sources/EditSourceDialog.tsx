@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Source } from '@/api/types';
 import { Button, Field, Modal, Switch } from '@/components/ui';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { useSourcesStore } from '@/stores/sourcesStore';
 import { formatRefresh } from '@/utils/date';
 import { flattenFolders, folderOptionLabel } from '@/utils/folders';
@@ -22,7 +23,9 @@ export const EditSourceDialog = ({ open, source, onClose }: EditSourceDialogProp
   const folders = useSourcesStore((state) => state.folders);
   const folderNodes = flattenFolders(folders);
   const update = useSourcesStore((state) => state.update);
+  const updateSettings = useSettingsStore((state) => state.update);
   const [name, setName] = useState('');
+  const [feedURL, setFeedURL] = useState('');
   const [folderId, setFolderId] = useState<number | null>(null);
   const [refresh, setRefresh] = useState(3600);
   const [fallback, setFallback] = useState('');
@@ -31,11 +34,13 @@ export const EditSourceDialog = ({ open, source, onClose }: EditSourceDialogProp
   const [initialLimit, setInitialLimit] = useState(20);
   const [backfillMode, setBackfillMode] = useState<'window' | 'full'>('window');
   const [fullText, setFullText] = useState(false);
+  const [pinned, setPinned] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!open || !source) return;
     setName(source.name);
+    setFeedURL(source.feed_url);
     setFolderId(source.folder_id);
     setRefresh(source.refresh_seconds);
     setFallback(source.fallback_url ?? '');
@@ -44,6 +49,7 @@ export const EditSourceDialog = ({ open, source, onClose }: EditSourceDialogProp
     setInitialLimit(source.initial_limit ?? 20);
     setBackfillMode(source.backfill_mode === 'full' ? 'full' : 'window');
     setFullText(Boolean(source.full_text));
+    setPinned((useSettingsStore.getState().settings.reader.pinned_sources ?? []).includes(source.id));
     setSaving(false);
   }, [open, source]);
 
@@ -62,6 +68,10 @@ export const EditSourceDialog = ({ open, source, onClose }: EditSourceDialogProp
       retention_max_items: retentionMaxItems,
       full_text: fullText,
     };
+    const nextFeedURL = feedURL.trim();
+    if (nextFeedURL && nextFeedURL !== source.feed_url) {
+      patch.feed_url = nextFeedURL;
+    }
     if (canBackfill) {
       patch.backfill_mode = backfillMode;
       if (backfillMode === 'window') {
@@ -69,6 +79,15 @@ export const EditSourceDialog = ({ open, source, onClose }: EditSourceDialogProp
       }
     }
     const updated = await update(source.id, patch);
+    if (updated) {
+      const currentPinned = useSettingsStore.getState().settings.reader.pinned_sources ?? [];
+      const nextPinned = pinned
+        ? (currentPinned.includes(source.id) ? currentPinned : [...currentPinned, source.id])
+        : currentPinned.filter((id) => id !== source.id);
+      if (nextPinned.length !== currentPinned.length || nextPinned.some((id, index) => id !== currentPinned[index])) {
+        updateSettings({ reader: { pinned_sources: nextPinned } });
+      }
+    }
     setSaving(false);
     if (updated) onClose();
   };
@@ -79,9 +98,10 @@ export const EditSourceDialog = ({ open, source, onClose }: EditSourceDialogProp
       onClose={onClose}
       title="编辑订阅源"
       subtitle={source.name}
+      wide
       footer={
         <>
-          <span className="modal-foot-note">修改会在下一次调度时生效</span>
+          <span className="modal-foot-note">保存后立即生效；修改订阅地址会重新抓取内容</span>
           <Button onClick={onClose}>取消</Button>
           <Button variant="primary" onClick={() => { void save(); }} disabled={saving}>
             {saving ? '正在保存' : '保存修改'}
@@ -90,9 +110,15 @@ export const EditSourceDialog = ({ open, source, onClose }: EditSourceDialogProp
       }
     >
       <div className="edit-source-form">
-        <Field label="源名称">
+        <div className="source-form-section span-2">基本信息</div>
+        <Field label="源名称" className="span-2">
           <input value={name} onChange={(event) => setName(event.target.value)} aria-label="源名称" />
         </Field>
+        {!source.feed_url.startsWith('imap://') ? (
+          <Field label="订阅地址" className="span-2" hint="修改后会自动更新源信息并重新抓取文章。">
+            <input value={feedURL} onChange={(event) => setFeedURL(event.target.value)} aria-label="订阅地址" />
+          </Field>
+        ) : null}
         <Field label="分组">
           <select
             value={folderId ?? ''}
@@ -103,18 +129,28 @@ export const EditSourceDialog = ({ open, source, onClose }: EditSourceDialogProp
             {folderNodes.map((node) => <option key={node.folder.id} value={node.folder.id}>{folderOptionLabel(node)}</option>)}
           </select>
         </Field>
+        <div className="field">
+          <span className="field-label">置顶</span>
+          <div className="edit-source-switch">
+            <Switch checked={pinned} onChange={setPinned} label="置顶订阅源" />
+          </div>
+          <span className="field-hint">显示在订阅源树顶部，不跟随原分组。</span>
+        </div>
+
+        <div className="source-form-section span-2">同步</div>
         <Field label="刷新间隔">
           <select value={refresh} onChange={(event) => setRefresh(Number(event.target.value))} aria-label="刷新间隔">
             {INTERVALS.map((value) => <option key={value} value={value}>{formatRefresh(value)}</option>)}
           </select>
         </Field>
         {source.kind === 'rss' ? (
-          <Field label="抓取全文">
+          <div className="field">
+            <span className="field-label">抓取全文</span>
             <div className="edit-source-switch">
               <Switch checked={fullText} onChange={setFullText} label="抓取全文" />
-              <span className="settings-field-hint">Feed 只有摘要时抓取原文；每次最多 12 条新文章，失败保留摘要。</span>
             </div>
-          </Field>
+            <span className="field-hint">Feed 只有摘要时抓取原文；每次最多 12 条新文章，失败保留摘要。</span>
+          </div>
         ) : null}
         {canBackfill ? (
           <Field label="抓取范围">
@@ -144,6 +180,8 @@ export const EditSourceDialog = ({ open, source, onClose }: EditSourceDialogProp
             <input value={`${source.initial_limit} 条`} readOnly aria-label="首次回溯上限" />
           </Field>
         ) : null}
+
+        <div className="source-form-section span-2">保留</div>
         <Field label="保留天数">
           <input
             type="number"
@@ -164,7 +202,13 @@ export const EditSourceDialog = ({ open, source, onClose }: EditSourceDialogProp
             aria-label="最多保留条数"
           />
         </Field>
-        <Field label="备用源" className="span-2">
+        <p className="source-form-note span-2">
+          0 表示不限；收藏和未读条目不会被清理。
+          {canBackfill && backfillMode === 'full' ? '保存「全部历史」后立即开始回补，进度见源备注；X 最多回补约 3200 条。' : ''}
+        </p>
+
+        <div className="source-form-section span-2">高级</div>
+        <Field label="备用源" className="span-2" hint="主源抓取失败时自动接管；留空则不启用。">
           <input
             value={fallback}
             onChange={(event) => setFallback(event.target.value)}
@@ -172,10 +216,6 @@ export const EditSourceDialog = ({ open, source, onClose }: EditSourceDialogProp
             aria-label="备用源"
           />
         </Field>
-        <p className="settings-field-hint span-2">
-          0 表示不限；收藏和未读条目不会被清理。
-          {canBackfill && backfillMode === 'full' ? '保存「全部历史」后立即开始回补，进度见源备注；X 最多回补约 3200 条。' : ''}
-        </p>
       </div>
     </Modal>
   );

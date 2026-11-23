@@ -12,7 +12,7 @@ export type IconName =
   | 'languages' | 'bot'
   | 'list' | 'type' | 'width' | 'height' | 'panel' | 'bell' | 'mail'
   | 'info' | 'focus' | 'minimize' | 'activity' | 'bar-chart' | 'at-sign' | 'message-circle'
-  | 'layers' | 'zap' | 'arrow-right' | 'palette' | 'bookmark' | 'pencil' | 'file-text'
+  | 'layers' | 'zap' | 'arrow-right' | 'palette' | 'bookmark' | 'pin' | 'pencil' | 'file-text'
   | 'settings-sources' | 'settings-reading' | 'settings-ai'
   | 'settings-wechat' | 'settings-backup' | 'settings-security';
 
@@ -192,6 +192,8 @@ export const Icon = ({ name, size = 18, filled = false, className = '' }: IconPr
       return <svg {...props}><path d="M12 3.5a8.5 8.5 0 1 0 0 17c1.4 0 2.2-.8 2.2-1.8 0-1.2-1.2-1.5-1.2-2.5 0-.8.7-1.4 1.6-1.4h1.6A4.3 4.3 0 0 0 20.5 10c0-3.6-3.8-6.5-8.5-6.5z" /><circle cx="7.5" cy="10" r=".9" fill="currentColor" stroke="none" /><circle cx="10" cy="6.8" r=".9" fill="currentColor" stroke="none" /><circle cx="14.2" cy="6.8" r=".9" fill="currentColor" stroke="none" /></svg>;
     case 'bookmark':
       return <svg {...props}><path d="M6.5 4.5h11v16L12 16.8 6.5 20.5z" /></svg>;
+    case 'pin':
+      return <svg {...props}><path d="M9 3.5h6l-1 5 3.5 3.5H13v7.5l-1 1-1-1V12H6.5L10 8.5z" /></svg>;
     case 'file-text':
       return <svg {...props}><path d="M6 3.5h8l4 4v13H6z" /><path d="M14 3.5v4h4M9 11h6M9 14.5h6M9 18h4" /></svg>;
     case 'pencil':

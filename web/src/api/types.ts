@@ -4,6 +4,14 @@ export type FetchResult = 'ok' | 'not_modified' | 'error';
 export type ThemePreference = 'light' | 'dark' | 'system';
 export type AccentColor = 'green' | 'blue' | 'cyan' | 'teal' | 'indigo' | 'purple' | 'pink' | 'rose' | 'red' | 'orange' | 'amber' | 'slate';
 export type SummaryStyle = 'bullets' | 'one';
+
+/** REQ-042：空字符串表示使用系统默认任务指令。 */
+export interface AIPromptSettings {
+  summary_bullets: string;
+  summary_one: string;
+  digest_batch: string;
+  digest_merge: string;
+}
 export type PushChannelKind = 'feishu' | 'generic_webhook';
 export type DigestPeriod = 'daily' | 'weekly';
 export type DigestReportStatus = 'ok' | 'empty' | 'partial' | 'error';
@@ -153,7 +161,13 @@ export interface Source {
   note?: string | null;
   backfill_mode: 'window' | 'full';
   full_text?: boolean;
+  watch_enabled?: boolean;
+  watch_mode?: WatchMode;
+  watch_ai?: boolean;
+  watch_channel_ids?: number[];
 }
+
+export type WatchMode = 'each' | 'batch';
 
 export interface SourceSummary {
   id: number;
@@ -218,6 +232,11 @@ export interface Translation {
 
 export interface ItemDetail extends ItemSummary {
   original_title?: string;
+  /** 邮件源为 imap://...，用于切换邮件正文布局与图片放行。 */
+  source_feed_url?: string;
+  sender_email?: string;
+  /** 该邮件条目已选择「显示图片」，之后打开不再拦截。 */
+  email_images_allowed?: boolean;
   content_html: string;
   content_text: string;
   audio_url?: string;
@@ -381,10 +400,15 @@ export interface SourceInput {
   retention_max_items?: number;
   backfill_mode?: 'window' | 'full';
   full_text?: boolean;
+  watch_enabled?: boolean;
+  watch_mode?: WatchMode;
+  watch_ai?: boolean;
+  watch_channel_ids?: number[];
 }
 
 export interface SourcePatch {
   name?: string;
+  feed_url?: string;
   folder_id?: number | null;
   refresh_seconds?: number;
   fallback_url?: string | null;
@@ -394,6 +418,68 @@ export interface SourcePatch {
   initial_limit?: number;
   backfill_mode?: 'window' | 'full';
   full_text?: boolean;
+  watch_enabled?: boolean;
+  watch_mode?: WatchMode;
+  watch_ai?: boolean;
+  watch_channel_ids?: number[];
+}
+
+// REQ-041：邮箱自动同步（IMAP）。支持多个账号；授权码只写不读，
+// GET 只返回每个账号的 password_set 状态。
+export interface EmailAccount {
+  id: string;
+  host: string;
+  port: number;
+  username: string;
+  poll_interval_minutes: number;
+  /** 单轮同步最多拉取多少封（跨文件夹）。 */
+  sync_limit: number;
+  folder_id: number | null;
+  password_set: boolean;
+}
+
+export interface EmailAccountInput {
+  id: string;
+  host: string;
+  port: number;
+  username: string;
+  poll_interval_minutes: number;
+  sync_limit: number;
+  folder_id: number | null;
+  /** 仅用于前端保留已保存状态；提交时后端忽略。 */
+  password_set?: boolean;
+}
+
+export interface EmailSettings {
+  enabled: boolean;
+  block_remote_images: boolean;
+  trusted_senders: string[];
+  accounts: EmailAccount[];
+}
+
+export interface EmailPatch {
+  enabled?: boolean;
+  block_remote_images?: boolean;
+  trusted_senders?: string[];
+  accounts?: EmailAccountInput[];
+  /** 单独保存/清除某个账号的授权码。 */
+  account_id?: string;
+  password?: string | null;
+}
+
+export interface EmailTestInput {
+  /** 已保存账号的 ID：省略 host/授权码时用账号配置补齐。 */
+  account_id?: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  /** 省略 = 用该账号已保存的授权码测试。 */
+  password?: string;
+}
+
+export interface EmailTestResponse {
+  ok: boolean;
+  mailboxes: string[];
 }
 
 export interface Settings {
@@ -408,6 +494,7 @@ export interface Settings {
     rail_width: number;
     list_width: number;
     views: SavedView[];
+    pinned_sources: number[];
   };
   ai: {
     enabled: boolean;
@@ -420,6 +507,8 @@ export interface Settings {
     used_today: number;
     tokens_month: number;
     consent: boolean;
+    prompts: AIPromptSettings;
+    prompt_defaults: AIPromptSettings;
   };
   wechat: {
     enabled: boolean;
@@ -443,6 +532,7 @@ export interface Settings {
     enabled: boolean;
     endpoint: string;
   };
+  email: EmailSettings;
 }
 
 export interface MCPToken {
@@ -460,12 +550,13 @@ export interface MCPTokenCreated extends MCPToken {
 
 export type SettingsPatch = {
   reader?: Partial<Settings['reader']>;
-  ai?: Partial<Settings['ai']>;
+  ai?: Omit<Partial<Settings['ai']>, 'prompts'> & { prompts?: Partial<AIPromptSettings> };
   wechat?: Partial<Settings['wechat']>;
   backup?: Partial<Settings['backup']>;
   feed?: Partial<Settings['feed']>;
   security?: Partial<Settings['security']>;
   mcp?: Partial<Settings['mcp']>;
+  email?: EmailPatch;
 };
 
 export interface WechatQrCode {
@@ -585,6 +676,7 @@ export interface ApiClient {
   getItemMarkdown(id: number): Promise<string>;
   fetchItemFullText(id: number): Promise<ItemDetail>;
   patchItemState(id: number, patch: { read?: boolean; starred?: boolean; later?: boolean; hidden?: boolean }): Promise<ItemSummary>;
+  setItemEmailImages(id: number, allowed: boolean): Promise<{ email_images_allowed: boolean }>;
   batchItemState(ids: number[], patch: { read?: boolean; starred?: boolean; later?: boolean; hidden?: boolean }): Promise<BatchStateResponse>;
   getItemNotes(id: number): Promise<ItemNote[]>;
   createItemNote(id: number, input: ItemNoteInput): Promise<ItemNote>;
@@ -608,6 +700,9 @@ export interface ApiClient {
   updateSettings(patch: SettingsPatch): Promise<Settings>;
   saveAiKey(apiKey: string): Promise<Settings>;
   testAiConnection(): Promise<AiTestResponse>;
+  /** REQ-041：null = 清除授权码；字符串 = 覆盖保存。 */
+  saveEmailPassword(accountId: string, password: string | null): Promise<Settings>;
+  testEmailConnection(input: EmailTestInput): Promise<EmailTestResponse>;
   generateSummary(itemId: number): Promise<AiSummary>;
   translateItem(itemId: number): Promise<Translation>;
   savePodcastProgress(itemId: number, positionSeconds: number, durationSeconds: number): Promise<void>;

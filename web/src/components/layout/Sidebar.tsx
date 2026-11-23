@@ -12,6 +12,7 @@ import type { Folder, Source } from '@/api/types';
 import { ResizeHandle } from '@/components/layout/ResizeHandle';
 import { EditSourceDialog } from '@/components/sources/EditSourceDialog';
 import { FolderEditDialog } from '@/components/sources/FolderEditDialog';
+import { WatchSourceDialog } from '@/components/sources/WatchSourceDialog';
 import {
   ConfirmDialog,
   ContextMenu,
@@ -91,6 +92,7 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
   const [collapsed, setCollapsed] = useState<Set<number>>(loadCollapsed);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [editingSource, setEditingSource] = useState<Source | null>(null);
+  const [watchSource, setWatchSource] = useState<Source | null>(null);
   const [editingFolder, setEditingFolder] = useState<Folder | null>(null);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -120,7 +122,13 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
   const effectiveTheme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
   const folderNodes = flattenFolders(folders);
   const folderById = new Map(folders.map((folder) => [folder.id, folder]));
-  const orphans = sources.filter((source) => source.folder_id == null || !folderById.has(source.folder_id));
+  const pinnedIds = settings.reader.pinned_sources ?? [];
+  const pinnedSet = new Set(pinnedIds);
+  const pinnedSources = pinnedIds
+    .map((id) => sources.find((source) => source.id === id))
+    .filter((source): source is Source => Boolean(source));
+  const unpinnedSources = sources.filter((source) => !pinnedSet.has(source.id));
+  const orphans = unpinnedSources.filter((source) => source.folder_id == null || !folderById.has(source.folder_id));
   const query = searchQuery.trim().toLowerCase();
   const sourceMatches = (source: Source) => !query
     || source.name.toLowerCase().includes(query)
@@ -138,7 +146,7 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
     if (!query) return true;
     if (folderMatchCache.has(folder.id)) return folderMatchCache.get(folder.id)!;
     folderMatchCache.set(folder.id, false);
-    const direct = sources.some((source) => source.folder_id === folder.id && sourceMatches(source));
+    const direct = unpinnedSources.some((source) => source.folder_id === folder.id && sourceMatches(source));
     const nested = (childrenByParent.get(folder.id) ?? []).some((child) => folderMatches(child));
     const result = folderNameMatches(folder) || direct || nested;
     folderMatchCache.set(folder.id, result);
@@ -148,7 +156,7 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
   const folderStats = (folderId: number): { unread: number; count: number; errors: number } => {
     const cached = folderStatsCache.get(folderId);
     if (cached) return cached;
-    const rows = sources.filter((source) => source.folder_id === folderId);
+    const rows = unpinnedSources.filter((source) => source.folder_id === folderId);
     const result = {
       unread: rows.reduce((sum, source) => sum + (source.kind === 'wechat' ? 0 : source.unread_count), 0),
       count: rows.length,
@@ -175,15 +183,19 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
     query ? folderMatches(folder) : !hiddenByCollapsedAncestor(folder)
   ));
   const rowsForFolder = (folder: Folder): Source[] => {
-    const rows = sources.filter((source) => source.folder_id === folder.id);
+    const rows = unpinnedSources.filter((source) => source.folder_id === folder.id);
     if (!query || folderNameMatches(folder)) return rows;
     return rows.filter(sourceMatches);
   };
+  const visiblePinned = query ? pinnedSources.filter(sourceMatches) : pinnedSources;
   const visibleOrphans = query ? orphans.filter(sourceMatches) : orphans;
   const attentionSources = sources.filter((source) => source.enabled && source.last_status === 'error');
   const selectedSources = sources.filter((source) => selected.has(`source:${source.id}`));
   const selectedFolders = folders.filter((folder) => selected.has(`folder:${folder.id}`));
   const treeEntries: Array<{ key: string; kind: 'source' | 'folder'; id: number }> = [];
+  for (const source of visiblePinned) {
+    treeEntries.push({ key: `source:${source.id}`, kind: 'source', id: source.id });
+  }
   for (const { folder } of visibleFolderNodes) {
     treeEntries.push({ key: `folder:${folder.id}`, kind: 'folder', id: folder.id });
     if (query || !collapsed.has(folder.id)) {
@@ -231,6 +243,13 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
       next.delete(id);
       return next;
     });
+  };
+
+  const togglePin = (sourceId: number) => {
+    const next = pinnedSet.has(sourceId)
+      ? pinnedIds.filter((id) => id !== sourceId)
+      : [...pinnedIds, sourceId];
+    updateSettings({ reader: { pinned_sources: next } });
   };
 
   const clearSelection = () => {
@@ -636,6 +655,9 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
       >
         <SourceIcon source={source} size={17} />
         <span className="source-name">{source.name}</span>
+        {source.watch_enabled && source.unread_count > 0 ? (
+          <span className="source-watch-dot" title="关注源有新内容" aria-label="关注源有新内容" />
+        ) : null}
         {(() => {
           const count = source.kind === 'wechat' ? source.item_count : source.unread_count;
           return count > 0 ? (
@@ -686,7 +708,19 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
     } else {
       menuItems = [
         { id: 'open', label: '打开', icon: 'inbox', onSelect: () => goFilter({ type: 'source', sourceId: menuSource.id }) },
+        {
+          id: 'pin',
+          label: pinnedSet.has(menuSource.id) ? '取消置顶' : '置顶',
+          icon: 'pin',
+          onSelect: () => togglePin(menuSource.id),
+        },
         { id: 'edit', label: '编辑订阅源', icon: 'pencil', onSelect: () => setEditingSource(menuSource) },
+        {
+          id: 'watch',
+          label: menuSource.watch_enabled ? '关注设置' : '关注订阅源',
+          icon: 'bell',
+          onSelect: () => setWatchSource(menuSource),
+        },
         { id: 'refresh', label: '立即刷新', icon: 'refresh', onSelect: () => { void useSourcesStore.getState().refresh(menuSource.id); } },
         {
           id: 'toggle',
@@ -913,6 +947,21 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
         </div>
       ) : null}
       <div className="rail-tree" aria-label="订阅源分组">
+        {visiblePinned.length > 0 ? (
+          <div className="folder-block rail-pinned">
+            <div className="folder-row">
+              <span className="folder-chevron" aria-hidden="true" />
+              <span className="folder-name is-static">
+                <Icon name="pin" size={12} />
+                置顶
+              </span>
+              <span className="folder-source-count">{visiblePinned.length}</span>
+            </div>
+            <div className="folder-sources">
+              {visiblePinned.map((source) => renderSource(source))}
+            </div>
+          </div>
+        ) : null}
         {visibleFolderNodes.map(({ folder, depth }, index) => {
           const rows = rowsForFolder(folder);
           const isCollapsed = !query && collapsed.has(folder.id);
@@ -1014,7 +1063,7 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
         ) : null}
 
         {sources.length === 0 ? <p className="rail-empty">还没有订阅源</p> : null}
-        {sources.length > 0 && visibleFolderNodes.length === 0 && visibleOrphans.length === 0 ? (
+        {sources.length > 0 && visiblePinned.length === 0 && visibleFolderNodes.length === 0 && visibleOrphans.length === 0 ? (
           <p className="rail-empty">没有匹配的订阅源</p>
         ) : null}
       </div>
@@ -1065,6 +1114,12 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
       ) : null}
 
       <EditSourceDialog open={Boolean(editingSource)} source={editingSource} onClose={() => setEditingSource(null)} />
+      <WatchSourceDialog
+        open={Boolean(watchSource)}
+        initialSourceId={watchSource?.id ?? null}
+        sources={sources}
+        onClose={() => setWatchSource(null)}
+      />
       <FolderEditDialog open={Boolean(editingFolder)} folder={editingFolder} onClose={() => setEditingFolder(null)} />
       <ConfirmDialog
         open={Boolean(pendingDelete)}
@@ -1160,8 +1215,8 @@ export const Sidebar = ({ inDrawer = false, onCloseDrawer }: SidebarProps) => {
                 goFilter({ type: 'source', sourceId: source.id });
               }}
             >
-              <SourceIcon source={source} size={22} />
-              <span>
+              <SourceIcon source={source} size={26} />
+              <span className="rail-fail-copy">
                 <strong>{source.name}</strong>
                 <small>{source.last_error || '抓取失败'}</small>
               </span>

@@ -1,7 +1,7 @@
 {
   "name": "rill-web",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.10",
   "type": "module",
   "description": "Rill 统一订阅入口 · React + Vite 前端",
   "scripts": {

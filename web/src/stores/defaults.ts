@@ -1,4 +1,5 @@
 import type { AccentColor, Settings, SettingsPatch } from '@/api/types';
+import { DEFAULT_AI_PROMPTS, EMPTY_AI_PROMPTS } from '@/utils/aiPrompts';
 
 const storedTheme = (() => {
   try {
@@ -57,6 +58,7 @@ export const DEFAULT_SETTINGS: Settings = {
     rail_width: storedWidth('rill.rail_width', DEFAULT_RAIL_WIDTH, RAIL_WIDTH_RANGE.min, RAIL_WIDTH_RANGE.max),
     list_width: storedWidth('rill.list_width', DEFAULT_LIST_WIDTH, LIST_WIDTH_RANGE.min, LIST_WIDTH_RANGE.max),
     views: [],
+    pinned_sources: [],
   },
   ai: {
     enabled: true,
@@ -69,6 +71,8 @@ export const DEFAULT_SETTINGS: Settings = {
     used_today: 34,
     tokens_month: 1_200_000,
     consent: true,
+    prompts: { ...EMPTY_AI_PROMPTS },
+    prompt_defaults: DEFAULT_AI_PROMPTS,
   },
   wechat: {
     enabled: true,
@@ -90,14 +94,41 @@ export const DEFAULT_SETTINGS: Settings = {
     enabled: false,
     endpoint: '/mcp',
   },
+  email: {
+    enabled: false,
+    block_remote_images: true,
+    trusted_senders: [],
+    accounts: [],
+  },
+};
+
+const mergeEmailSettings = (current: Settings['email'], patch: SettingsPatch['email']): Settings['email'] => {
+  if (!patch) return current;
+  const existing = new Map(current.accounts.map((account) => [account.id, account]));
+  return {
+    enabled: patch.enabled ?? current.enabled,
+    block_remote_images: patch.block_remote_images ?? current.block_remote_images,
+    trusted_senders: patch.trusted_senders ?? current.trusted_senders,
+    accounts: patch.accounts
+      ? patch.accounts.map((account) => ({
+        ...account,
+        password_set: account.password_set ?? existing.get(account.id)?.password_set ?? false,
+      }))
+      : current.accounts,
+  };
 };
 
 export const mergeSettings = (current: Settings, patch: SettingsPatch): Settings => ({
   reader: { ...current.reader, ...patch.reader },
-  ai: { ...current.ai, ...patch.ai },
+  ai: {
+    ...current.ai,
+    ...patch.ai,
+    prompts: { ...current.ai.prompts, ...patch.ai?.prompts },
+  },
   wechat: { ...current.wechat, ...patch.wechat },
   backup: { ...current.backup, ...patch.backup },
   feed: { ...current.feed, ...patch.feed },
   security: { ...current.security, ...patch.security },
   mcp: { ...current.mcp, ...patch.mcp },
+  email: mergeEmailSettings(current.email, patch.email),
 });

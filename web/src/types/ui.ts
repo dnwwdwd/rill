@@ -26,14 +26,15 @@ export interface SourceStatusMeta {
   label: string;
 }
 
-export const SELECTABLE_SETTINGS = ['sources', 'reading', 'ai', 'automation', 'mcp', 'backup', 'security'] as const;
+export const SELECTABLE_SETTINGS = ['sources', 'reading', 'ai', 'email', 'automation', 'mcp', 'backup', 'security'] as const;
 export type SettingsSection = typeof SELECTABLE_SETTINGS[number];
 
-// 设置分类（REQ-023 + REQ-036/037）：公众号接入并入订阅源；自动化承载定时报告/推送渠道/过滤规则。
+// 设置分类（REQ-023 + REQ-036/037 + REQ-041）：公众号接入并入订阅源；自动化承载定时报告/推送渠道/过滤规则。
 export const SETTINGS_SECTIONS: Array<{ key: SettingsSection; label: string; icon: IconName }> = [
   { key: 'sources', label: '订阅源', icon: 'settings-sources' },
   { key: 'reading', label: '阅读', icon: 'settings-reading' },
   { key: 'ai', label: 'AI', icon: 'sparkles' },
+  { key: 'email', label: '邮箱同步', icon: 'mail' },
   { key: 'automation', label: '自动化', icon: 'zap' },
   { key: 'mcp', label: 'MCP', icon: 'bot' },
   { key: 'backup', label: '备份', icon: 'settings-backup' },
