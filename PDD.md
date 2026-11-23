@@ -2,7 +2,7 @@
 
 > 产品设计文档 / 技术实现方案（Product Design Document）
 >
-> 版本：0.21 · 日期：2026-11-03 · 状态：设计稿；前端视觉与源管理细化完成，后端 MVP 已交付并完成本地联调；创作者名称搜索与批量订阅已实现核心；LPK v0.1.2 已安装到默认微服，真实浏览器 OIDC 待验收>
+> 版本：0.30 · 日期：2026-11-23 · 状态：设计稿；前端视觉与源管理细化完成，后端 MVP 已交付并完成本地联调；自动化、邮箱同步与自定义 AI 提示词已实现核心；真实浏览器 OIDC 待验收>
 > v0.2 变更：合并 PDD v0.1 与两轮评审结论；架构由「单二进制 + `embed` + HTMX」改为**后端 Go 单二进制 + 前端 Vue 3 + Vite 前后端分离**；删除不存在的 `XAdapter`（X 走标准 RSS 适配器）；调度改为落库驱动；补齐数据模型、API 契约、部署与打包约束。产品需求见 [PRD](./PRD.md)，本文不重复功能编号的定义，只在需要时引用 `F-xx`。
 >
 > v0.3 变更：前端技术由 Vue 3 + Pinia 改为 **React 19 + Vite + TypeScript**，路由改用 React Router，跨组件状态改用 Zustand；样式保持 CSS 变量 + 分层原生 CSS，不引入运行时 CSS-in-JS。新增 `web/` 工程目录与 mock API 约定，前端可在后端未完成时独立开发。PRD 同步更新技术描述。
@@ -50,6 +50,14 @@
 > v0.25 变更（2026-11-11，REQ-038，DEC-029）：迁移 10（SchemaVersion 10）新增 `mcp_tokens`；设置新增 MCP 开关与多命名 Bearer Token；`/mcp` 使用 MCP Streamable HTTP（SSE），加入 LPK `public_path`，工具覆盖读取与写入但不提供删除，也不暴露密钥/设置/备份恢复；新增 `GET /api/v1/items/{id}/markdown` 与前端复制/下载（blob 锚点接入懒猫 file-chooser inject）。
 >
 > v0.26 变更（2026-11-12，REQ-039）：迁移 11（SchemaVersion 11）新增 `items.later_at` 与 `item_notes`；条目查询/统计/状态支持 `later`，新增笔记 CRUD；`OPML export/import` 支持 `folder_id` 子树范围；`sources.config_json.full_text` 控制每源全文抓取；侧栏批量/搜索/保存视图、列表多选与跨源重复合并、命令面板、浏览器朗读；MCP 增加 `move_source`/`move_sources`/`reorder_folders`，仍不提供删除。
+>
+> v0.27 变更（2026-11-13，REQ-040，DEC-031）：不新增 schema。置顶源存 `settings.reader.pinned_sources`（全局置顶区，桌面/移动端一致）；源级关注配置写入 `sources.config_json`（`watch_enabled/watch_mode/watch_ai/watch_channel_ids`）；抓取提交并过过滤规则后，对新条目按「每篇一条 / 每次抓取合并一条」推送现有 `push_channels`，AI 总结跟随聚合模式，AI 失败退回标题列表；首次抓取与历史回补不提醒；关注源未读显示 dot（§4.3/§5.2/§9.1/§9.2）。
+>
+> v0.28 变更（2026-11-22，REQ-042，DEC-034）：`settings.ai` 新增 `prompts`（`summary_bullets` / `summary_one` / `digest_batch` / `digest_merge`），空值回退系统默认；`GET /settings` 同时返回只读 `prompt_defaults`，`PATCH /settings` 接受 `ai.prompts`，单项上限 4000 字符；只有任务指令可编辑，system 角色与 `<<<BEGIN_UNTRUSTED_CONTENT>>>` 边界固定。摘要、报告分批/最终简报与关注源 AI 总结统一读取该配置；不新增 schema，已缓存结果不自动重算（§10）。
+>
+> v0.29 变更（2026-11-23，REQ-044）：`PATCH /sources/{id}` 支持 `feed_url`，变更后清空缓存型元数据并立即抓取，成功后回填新 Feed 的名称/站点/图标（`config_json` 临时标记 `refresh_metadata`，无 schema 迁移）；`PATCH /items/{id}/email-images` 把单封邮件图片放行写入 `media_json.email_images_allowed`，详情返回该字段（§5.2/§7.7）。
+>
+> v0.30 变更（2026-11-23，REQ-045）：阅读筛选与最近文章写入 localStorage（`rill.reader.filter.v1` / `rill.reader.readFilter.v1` / `rill.reader.lastItem.v1`），刷新后恢复源/分组列表，`/` 首次加载回到最近文章；删除对象回退「全部」，退出登录清理（§6.5）。
 
 ---
 
@@ -383,7 +391,7 @@ CREATE INDEX idx_item_notes_item ON item_notes(item_id, created_at);
 
 ### 4.3 设计说明
 
-- `sources.config_json` 存源类型专属字段，避免为每种源加列；当前未使用，为后续源保留。
+- `sources.config_json` 存源类型专属字段，避免为每种源加列：`full_text`（自动全文抓取）、`watch_enabled` / `watch_mode`（`each` | `batch`）/ `watch_ai` / `watch_channel_ids`（关注源更新提醒）。置顶源不写源表，存 `settings.reader.pinned_sources`（源 ID 数组，最多 200，跨设备同步）。
 - 无 `cursor` 字段：v1 的源全部是「取最近 N 条 + 本地 `guid` 去重」，不存在增量游标。将来接分页型 API 源时再加，不要在字段里留无使用者的空位。
 - `items.guid` 是去重主键：RSS 用 `guid`/`id`，退回 `link`，再退回 `sha256(title + published_at_raw + content_text)`。
 - 已读/收藏直接放 `items`：单用户没有写热点，`LEFT JOIN` 会让「只看未读」在 10 万条下走不到部分索引。
@@ -437,7 +445,7 @@ DELETE /api/v1/folders/{id}            # 源回落到未分组，不级联删源
 GET    /api/v1/sources?folder_id=
 POST   /api/v1/sources                 # {url} 或 {kind:"x", handle}；创建后同步抓取一次
 GET    /api/v1/sources/{id}            # 源详情 + 健康状态 + Feed 路径（前端诊断页）
-PATCH  /api/v1/sources/{id}
+PATCH  /api/v1/sources/{id}             # 含 watch_enabled/watch_mode/watch_ai/watch_channel_ids
 DELETE /api/v1/sources/{id}
 POST   /api/v1/sources/{id}/fetch      # 手动刷新
 POST   /api/v1/sources/{id}/fallback   # 切换备用源抓取一次
@@ -470,9 +478,10 @@ POST   /api/v1/items/{id}/translation  # AI 翻译，返回完整结果（兼容
 POST   /api/v1/items/{id}/translation/stream  # AI 翻译，SSE（title/segment/progress/done/error，?force=1 跳过缓存）
 
 GET    /api/v1/search?q=&cursor=
-GET    /api/v1/settings
-PATCH  /api/v1/settings
+GET    /api/v1/settings                 # reader.pinned_sources 返回置顶源 ID 数组
+PATCH  /api/v1/settings                 # reader.pinned_sources 最多 200、正整数去重
 POST   /api/v1/settings/ai/test        # 测试 OpenAI 兼容接口连通性
+POST   /api/v1/settings/email/test     # 测试 IMAP 连接：LOGIN + LIST 文件夹；授权码只写入不回显
 POST   /api/v1/settings/feed-token/reset  # 重置全站聚合 Feed / OPML 输出令牌
 POST   /api/v1/settings/feed-token/reveal # CSRF 保护，按需返回完整 token；no-store
 POST   /api/v1/wechat/weread/scan      # 微信读书扫码：生成二维码，UID 不返回前端
@@ -517,7 +526,9 @@ GET    /api/v1/healthz
 ```
 
 - `POST /api/v1/sources` 创建成功后立即同步抓取一次（20 秒上限）；抓取失败只写回源错误状态，不回滚已创建的源。测试通过 `Options.DisableInitialFetch` 关闭该行为。
-- 订阅源的 `config_json` 目前只保存 `full_text`（布尔）；`Source.full_text` 由后端解析后返回，前端编辑源时写回 `PATCH /sources/{id}`，不新增列。
+- `PATCH /api/v1/sources/{id}` 可修改 `feed_url`（REQ-044）：按源类型校验、大小写不敏感去重；变更时清空 ETag/Last-Modified/图标缓存与失败状态、重置首次抓取标记并立即抓取（20 秒上限）。成功后更新源名称（同请求未显式改名时）、`site_url` 与图标；旧条目保留。`imap://` 邮箱同步源不允许修改地址。
+- `PATCH /api/v1/items/{id}/email-images` 接收 `allowed`，仅邮件源条目可用；把单封远程图片放行状态写入 `items.media_json.email_images_allowed`。
+- 订阅源的 `config_json` 保存 `full_text`（布尔）和关注提醒字段（`watch_enabled/watch_mode/watch_ai/watch_channel_ids`）；`Source` 由后端解析后返回这些字段，前端编辑源时写回 `PATCH /sources/{id}`，不新增列。
 - 前端添加源单输入自动识别：X 主页链接 / `@用户名` / 无点用户名 → `{kind:"x", handle}`；Bluesky 主页链接 / `@含点域名handle` → 官方 RSS `{kind:"rss", feed_url:"https://bsky.app/profile/{handle}/rss"}`；`rsshub://` 分享链接由后端归一化；其他 URL 先 `POST /sources/resolve` 识别平台，未识别再走 `POST /sources/discover`，单候选直接创建，多候选由用户选择，discover 失败时按原 URL 兜底创建。
 - `POST /sources/resolve` 识别 BestBlogs 多平台目录 / Apple Podcasts / 小宇宙 / 微博 / Medium / Mastodon；公众号裸名称先查 BestBlogs，`bestblogs:{名称}` 跨公众号/小宇宙/X/YouTube 搜索；命中直接创建 `kind=rss`，未命中/目录不可用回退公众号后台（仅当前后台管理账号）。平台解析失败返回明确错误，不回退成「把主页当 RSS」。候选含 `platform/kind/name/feed_url/site_url/icon_url/note/partial`。2026-11-08 增补：候选另含 `icon_proxy_url`，指向 `GET /api/v1/media/candidate/{hash}` 服务端代理出图——微博 `sinaimg.cn` 对外站 Referer 一律 403，浏览器直连候选头像必裂；代理只允许 resolve/搜索预先登记进 `media_cache` 的 URL，未登记 hash 一律 404；`icon_url` 保持原始 URL，仍是创建源落库的值。
 - `POST /sources/search` 是名称搜索，不是链接解析：`query` 必填（≤80 字），`platforms` 可省略（默认全部，支持 `apple/bluesky/weibo/bestblogs`）。候选含 `platform/kind/name/handle/feed_url/site_url/icon_url/icon_proxy_url/note/match/source/partial/existing_source_id`；平台状态含 `ok/empty/error/timeout`。并行执行、失败隔离，候选按 Feed URL 去重，原生结果优先于 BestBlogs 目录。已订阅标记按当前 `sources.feed_url` 每次重算，不写入缓存。
@@ -599,7 +610,7 @@ GET /api/v1/healthz     # 详细版，供运维与监控
 
 - `summary` / `translation` 不存在时省略字段；前端展示「尚未生成」并提供手动触发。
 - `cover_url` 是列表与详情共用的派生字段：有媒体代理图片时返回 `/media/{token}/{hash}`，否则为 `null`；不保证首图就是编辑封面。
-- `content_html` 由后端清洗并重写媒体地址；前端仍用 DOMPurify 做第二道白名单，并给外链补 `rel="noopener noreferrer"`。
+- `content_html` 由后端清洗并重写媒体地址；前端仍用 DOMPurify 做第二道白名单，并给外链补 `rel="noopener noreferrer"`。正文 `<img>` 统一带 `referrerpolicy="no-referrer"`：微信 `mmbiz.qpic.cn` 按 Referer 返回「未经允许不可引用」占位图，存量远程图片依赖该属性，公众号新正文图片另经 `/media/` 代理缓存（BUG-002）。
 - `POST /api/v1/items/{id}/summary` 与翻译触发接口返回完整结果；`/summary/stream` 按 token 推送 `delta`，`/translation/stream` 先推送 `title`，再按段落推送 `segment` 与 `progress`，两者结束时推送 `done` 并落库；前端先显示骨架/流式预览，失败可重试。译文记录同时保存标题与正文，旧记录缺少标题时标记为需重译。翻译接口支持 `?force=1` 跳过缓存，供「重新翻译」按钮在正文更新检测之外强制刷新。
 - `POST /api/v1/backup/restore` 使用 `multipart/form-data`，字段名 `file`；恢复前校验 SQLite 完整性与 schema 版本，失败返回可读错误且不替换现库。
 - `POST /api/v1/settings/feed-token/reset` 只重置全站聚合 Feed / OPML 令牌；单源令牌仍走 `POST /api/v1/sources/{id}/token/reset`，两者互不影响。
@@ -680,12 +691,15 @@ web/
 | F-03/F-26 OPML 与文件夹 UI | 前端复用 `GET/POST /api/v1/opml/export|import` 和 folders CRUD；订阅源设置以可折叠 filetree 展示，分组行支持展开、添加源、编辑/移动/删除，源行支持编辑/移动、刷新、启停和删除；侧边栏源树支持右键/长按编辑、删除、移动，桌面拖拽源归类与分组嵌套/排序，复用 `PATCH /folders/{id}` 的 `parent_id`/`sort` 与 `PATCH /sources/{id}` 的 `folder_id`；导入用 `multipart/form-data`，导入后刷新 folders/sources；删除文件夹由后端把源 `folder_id` 置空、子文件夹上移；不新增 schema |
 | 缓存与备份 | 媒体缓存按 `RILL_MEDIA_MAX_BYTES` 淘汰最旧文件并标记 pending；图标缓存 8 MB / 500 文件；上传备份先经 `database.PrepareForRestore` 完整性校验并迁移旧 Schema，再做安全备份和替换 |
 | F-07/F-32 已读与阅读位置 | 列表点击先乐观写 `read_at`，再调用既有 `PATCH /items/state`；直接访问仍由 `useReadMarker` 在详情加载完成后观察 3 秒；阅读位置按条目写 `localStorage`，不落库、不新增列；右侧进度从 `.reader-scroll` 的 `scrollTop / (scrollHeight - clientHeight)` 计算，以 50px 环形进度显示，回到顶部为独立按钮 |
+| F-59 阅读上下文恢复 | `readerStore` 初始化时从 `rill.reader.filter.v1` / `rill.reader.readFilter.v1` 恢复筛选，`setFilter` / `setReadFilter` 写回；`loadDetail` 成功记录 `rill.reader.lastItem.v1`。`ReaderPage` 首次加载且 URL 无文章 ID 时校验最近文章后 `replace` 到 `/items/{id}`；源/分组加载完成后若目标已删除则回退「全部」；退出登录 `reset` 清除三个键。仅一次完整页面加载恢复一次，应用内回列表不重定向 |
 | F-01/F-26 添加源分组 | 添加源弹窗为单输入：X 链接/用户名提交 `{kind:"x", handle}`，其他 URL 先 discover；提交 `folder_id: number \| null`，默认 `null` 落「未分组」；后端创建后同步抓取一次；已有 `sources.folder_id` 足够，不新增 schema |
 | F-49 创作者名称搜索 | 添加源弹窗分「链接 / ID」与「搜索创作者」；名称搜索调用 `POST /sources/search`，候选按平台分组、显示已订阅/受限/平台失败；多选后调用 `POST /sources/batch`，最多 20 个，按当前分组落库；批量路径不等待首次抓取，后台补抓；不新增 schema |
 | F-52 侧栏批量与保存视图 | 侧栏源/分组支持 Ctrl/Cmd 多选、Shift 范围选择，批量调用 `sources/batch-update` 与 `batch-delete`；分组删除逐项走 folders DELETE；分组未读/失败聚合在 sources 数据上计算，`mark-all-read {folder_id}` 用递归 CTE 覆盖子树；保存视图写入 `settings.reader.views`，最多 30 个；折叠状态仅 localStorage |
 | F-53 稍后读/笔记/高亮/朗读 | 迁移 11 增加 `items.later_at` 与 `item_notes`；`items?later=1`、state `later/hidden`、notes CRUD 端点；详情/专注阅读选中文字保存摘录与笔记，正文按 quote 首次匹配包 `<mark>`；浏览器 SpeechSynthesis 朗读 `content_text`；笔记随条目级联删除 |
 | F-54 分组 OPML/重复合并/命令面板 | `GET /opml/export?folder_id` 输出目标分组根 outline 与子树；`POST /opml/import?folder_id` 把顶层 outline 落到目标分组；列表按规范化 URL 或 ≥12 字标题 + 7 天窗口在已加载条目内合并重复，仅前端展示「+N 源」；命令面板 `⌘K` 复用现有路由与筛选，不新增接口 |
 | F-17 全文抓取 | 每源 `config_json.full_text` 自动模式，外加正文/专注阅读右上角 `POST /items/{id}/fulltext` 按当前文章即时抓取；抓原文页，优先 article/main/常见正文容器；自动模式单次最多 12 条新条目、并发 4、单条 7 秒；手动模式 15 秒、最小 60 字；失败保留摘要；不新增列 |
+| F-55 置顶订阅源 | `settings.reader.pinned_sources` 保存源 ID 数组（≤200、正整数去重）；桌面侧栏与移动端订阅源页把置顶源从原分组移出、集中渲染在顶部「置顶」区；右键菜单与编辑源弹窗都能切换；分组计数只统计未置顶源 |
+| F-56 关注源即时提醒 | 源级配置写 `sources.config_json.watch_*`；入口为「设置 → 自动化 → 关注订阅源」及侧栏源右键「关注订阅源 / 关注设置」，共用 `WatchSourceDialog`；非首次抓取提交并执行过滤规则后，用 `applyFeedResult` 的 `notifyWatch` 参数触发后台提醒 goroutine；`each` 逐条、`batch` 合并，最多 20 条；AI 总结跟随模式（单篇 `generateSummary` / 批次 `digestBatchSummary`），失败退回标题；推送复用 `push_channels` 与 `postToChannel`；源列表 dot 取 `watch_enabled && unread_count > 0`，页面可见时每 60 秒轻量刷新源列表/统计 |
 | F-50 MCP 服务 | 设置「MCP」分类开关写 `settings.app_settings.mcp.enabled`；令牌管理走 `/api/v1/mcp/tokens`，完整令牌只显示一次；`/mcp` 由 Go MCP SDK 的 stateless Streamable HTTP handler 提供，Bearer 中间件先校验总开关与 `mcp_tokens` 哈希；工具通过内部 handler 复用既有业务校验，删除类端点不注册；不改变管理 API 的 session/CSRF |
 | F-51 正文 Markdown | `GET /api/v1/items/{id}/markdown` 用 `server/internal/markdown` 把已清洗 HTML 转为 Markdown；前端复制直接写剪贴板，下载先用 `URL.createObjectURL` 生成 blob 再点击 `<a download>`，由懒猫 file-chooser inject 拦截并提供本地/懒猫保存；始终导出原文，不拼接译文 |
 | F-45 源图标 | Feed 图标 → 站点 icon link → `/favicon.ico`；经 `fetch.Client` 做 scheme/大小/跳转限制；缓存 `RILL_CACHE_DIR/icons/<source_id>`，7 天；失败写 `.failed` 1 小时退避；API 只暴露受登录保护的 `/api/v1/sources/{id}/icon` |
@@ -808,6 +822,13 @@ type FetchResult struct {
   - 入口 `xiaoyuzhou://podcast/{pid}`；请求节目页，解析 `__NEXT_DATA__` 的 `props.pageProps.podcast`。
   - 只取页面自带 `episodes`（实测 15 条）；`guid=eid`；`audio_url=enclosure.url`；`audio_type` 按扩展名。
   - 不承诺全量；有 `feed.xyzfm.space` 时解析器已创建 `rss`，不走本适配器。
+  - **2026-11-21（BUG-003）**：`feed.xyzfm.space` 上游加 IP 白名单（302 → 403 HTML，
+    `denied by IP ACL`），官方分发 Feed 对自托管出口不可用。`fetchSource` 抓取失败时
+    **自动永久替换订阅方式**：从 `site_url` 或条目单集链接（`xiaoyuzhoufm.com/episode/{eid}`
+    → 单集页反查 pid）恢复节目 ID，改写源 `feed_url` 为 `xiaoyuzhou://podcast/{pid}`、
+    更新 `site_url` 与备注，随后走本适配器抓取；此后不再请求被拒的 Feed。
+    pid 无法恢复（Apple 解析源且无任何单集条目）才报「无法自动恢复小宇宙节目 ID」。
+    `FetchFeed` 的 Content-Type 错误附带重定向目标提示。
 - `weibo`（`kind=rss` + `weibo://`）：
   - 入口 `weibo://user/{uid}`；匿名访客 Cookie 只存内存，TTL 1 小时。
   - `POST visitor.passport.weibo.cn/visitor/genvisitor2` 取 `SUB/SUBP`；`GET m.weibo.cn/api/container/getIndex?...&count=100`。
@@ -831,6 +852,28 @@ type FetchResult struct {
 - 前端：添加源弹窗分段「链接 / ID」与「搜索创作者」；候选按平台分组，组头显示数量；平台状态用 `ok/empty/timeout/error` 标签展示；已订阅禁用；多选后调用批量接口。
 - 批量首次抓取：`POST /sources/batch` 立即返回，后台最多 4 个并发、每个 20s 上限；不阻塞响应，也不一次打开 20 个出站请求。
 - 限制：X 没有免费全局名称搜索，YouTube/小宇宙/公众号只覆盖目录；Medium/Mastodon/Threads/Instagram 不在第一版。同名候选不默认全选，不进行跨平台身份合并。
+
+### 7.7 邮箱自动同步适配器（2026-11-21，REQ-041）
+
+- **协议边界**：收信只走 IMAP TLS 客户端（出站 993），不自建 SMTP 监听 25 端口——家庭宽带与微服云环境均封 25 端口，且无 MX/PTR 条件。不做 POP3。
+- **连接配置**：存 `settings.app_settings` 的 `email` 节（`enabled/block_remote_images/trusted_senders/accounts[]`）；每个账号含 `id/host/port/username/poll_interval_minutes/sync_limit/folder_id`。授权码按账号用 `SecretBox` AES-GCM 加密，键 `email_password_enc:{account_id}`（旧版回退 `email_password_enc`），接口只返回 `password_set`；同步游标按键 `email_sync_state:{account_id}`。不新增表/列/迁移。
+- **源模型**：不新增 `sources.kind`：`kind=rss`，每个账号一个 `feed_url=imap://{username}`，源名 = 邮箱账号。旧版 `imap://{username}/{sender_email}` 源保留内容但自动停用；移除账号时停用其源并删除授权码，保留已抓内容。`validateSourceURL` 对 `imap://` 前缀特殊放行。邮箱源必须经 `sourceInternal` 读取 `feed_token` 后再构建媒体 URL；历史 `/media//{hash}` 或旧 token 地址在详情读取时修复为当前 token，并从 `media_json.images` 回填 `data-remote-src`（BUG-008）。
+- **解析库**：`github.com/emersion/go-imap/v2`（IMAP4rev1 客户端，TLS、LIST、SELECT、SEARCH、FETCH）；MIME 用标准库 `net/mail` + `mime/multipart` + `mime.WordDecoder`，不引入 go-message。
+- **同步范围**：`LIST "" "*"` 后同步 `INBOX` 与所有自定义文件夹；排除 `\Sent/\Drafts/\Trash/\Junk/\All/\Flagged/\Important` 以及中英文系统文件夹名。`INBOX` 优先，其余按名称排序。
+- **管线**（`internal/fetch/imap.go` + `internal/server/email_service.go`）：
+  1. 调度器 tick 内检查 `next_fetch_at`；`fetchSource` 对 `imap://` 前缀分支到 `syncEmailMailbox`。
+  2. 逐文件夹 `SELECT`；首次或 `UIDVALIDITY` 变化时按序列号取账号同步上限内的最新邮件作为基线；之后 `SEARCH UID {last+1}:*` 从旧到新增量拉取。单文件夹最多 100 封、单轮上限为账号 `sync_limit`（10–500，默认 60）。
+  3. `BODY.PEEK[]` 拉全文；**不发送 `STORE \Seen`**，不改变用户邮箱已读状态。
+  4. 字段映射：`guid=Message-ID`（缺失用 SHA-256(From+Subject+Date) 兜底）；`title=Subject`（RFC 2047 解码）；`author=From` 友好名；`published_at=Date`；`link` 优先 `Archived-At`，次选正文「View in browser / 在浏览器中阅读」链接，兜底空。
+  5. CID 内嵌图：`multipart/related` 内联附件字节写入媒体缓存目录 + `media_cache` 直插 `status='ok'` 行，正文 `cid:` 引用重写为 `/media/{token}/{hash}` 并标记 `data-inline-image=1`；远程图保留 `data-remote-src` 原始地址。
+  6. 正文经既有 `fetch.SanitizeContent` 清洗；组装 `fetch.FeedResult` 后复用 `applyFeedResult`——过滤规则、关注提醒、保留策略与 `fetch_logs` 全部自动生效。发件人地址写入 `media_json.email_sender`，单封图片放行写入 `media_json.email_images_allowed`，详情返回 `source_feed_url`/`sender_email`/`email_images_allowed`（REQ-044，无 schema 迁移）。
+  7. 单封解析/入库失败时保留该文件夹旧游标，下轮重试；已入库条目按 `Message-ID` 去重。
+- **命名与分组**：每个账号的源名 = 邮箱账号；可单独归入一个 Rill 分组，不选则未分组。`ensureEmailSources` 每次保存同步每个账号源的名称/分组/轮询间隔，并让启用状态跟随全局开关；启动时调用同一逻辑迁移旧单账号并停用旧按发件人源。
+- **正文展示**：邮件正文使用专用 `SanitizeEmailContent`，保留安全的 `style`/`background`、表格/字体布局标签与 `data:image/...;base64` 内联图，同时仍拦截脚本与事件属性；协议相对 URL 补全，仅 `srcset` 时取首个候选，CID 图片兼容错误 Content-Type。前端 `ArticleContent` 对邮件源加 `is-email`；远程图片默认拦截（含 CSS 背景图），「显示图片」通过 `PATCH /items/{id}/email-images` 按条目持久化，「始终显示此发件人的图片」写入 `settings.email.trusted_senders`。放行后优先加载 `/media` 代理，加载失败再回退 `data-remote-src` 原图（BUG-008）。
+- **连接测试**：`POST /settings/email/test` 可带 `account_id` 复用已保存配置与授权码；成功时清除该账号源的健康错误并安排立即重试；前端在测试成功后立即落库配置、必要时保存草稿授权码并强制刷新源列表。任何影响源的邮箱设置（启用、账号数组、轮询、分组、授权码）保存后也会刷新源树。
+- **鉴权失效**：LOGIN 失败或 IMAP 错误 → 源 `last_status=error`，错误信息含「检查客户端授权码」指引。
+- **限制**：首次同步不回溯全部历史，单次数量受账号设置约束；多账号共享同一调度器，单账号失败只影响自身源；不支持自建 SMTP 收信；Gmail 需微服出口可达 Google；被邮箱厂商投进垃圾箱的信件收不到；附件（非内联图）不入正文，仅登记媒体缓存。
+
 
 ## 8. 输出层
 
@@ -879,6 +922,7 @@ type FetchResult struct {
 - 加随机抖动（±10%）避免同一批次同时打同一站点。
 - 2026-11-10（REQ-036，DEC-027/028）：同一 30s tick 内顺带检查 `digest_rules`（`enabled=1 AND next_run_at <= now`），逐条生成报告：窗口 = `last_run_at → now`（无 last_run_at 时按周期回溯 24h/7d）；范围条目跳过 `hidden=1`；`run_at_local` 按 `RILL_TIMEZONE`（默认 `Asia/Shanghai`）解释，`next_run_at` 落 UTC 绝对时间；AI 启用时先取已有单条摘要缓存、缺失项按批（每批 ≤8 条，标题+正文节选 ≤600 字）生成 ≤40 字分条小结，再合并为 900-1400 字极简简报；AI 未启用/失败降级为标题列表（status `partial`/`error`）；生成后按 `channel_ids_json` 逐渠道推送（空 = 不推送；飞书 interactive 卡片只发简报、完整清单留在 Rill，自定义 webhook 发完整 Markdown），单渠道失败不阻塞其余渠道；飞书返回 HTTP 200 但业务码非 0 也记为失败；完成后写 `last_run_at` 并按周期推算 `next_run_at`（落库，重启不重复生成）；空窗口默认不生成不推送（`push_when_empty=1` 除外）；手动 `POST /digest/rules/{id}/run` 生成但不改 `next_run_at`。
 - 2026-11-10（REQ-037）：条目入库（upsert 插入新条目后）按源评估启用的过滤规则：标题/正文匹配关键字或正则，动作 `mark_read` 写 `read_at`、`hide` 写 `hidden=1`；命中更新 `hit_count`；正则非法在保存时拒绝，运行期跳过；「应用到存量」为手动触发端点，不改变已读/收藏状态。
+- 2026-11-13（REQ-040，DEC-031）：`sources.config_json.watch_enabled=1` 的源在**非首次抓取**提交成功后，对本次新条目发送提醒。提醒在过滤规则之后执行，跳过 `hidden=1` 或已读条目；`applyFeedResult` 接收 `notifyWatch` 参数，首次抓取与全量回补传 `false`，避免历史条目一次性推送。`watch_mode=each` 逐条推送（单次最多 20 条），`batch` 合并为一条；`watch_ai=1` 时逐条模式生成单篇摘要、合并模式调用报告批摘要，AI 未启用或失败自动退回标题列表。只使用 `watch_channel_ids` 中启用的 `push_channels`；渠道为空/停用或发送失败只写日志，不影响抓取、入库与未读状态。
 
 ### 9.2 单次抓取流程
 
@@ -892,6 +936,8 @@ scheduler → 到期源 → adapter.Fetch
   → upsert items（§4.4）
   → 更新 sources.last_fetch_at / last_new_item_at / last_status / next_fetch_at
   → 写 fetch_logs
+  → 过滤规则（可选）
+  → 关注源提醒（可选；首次抓取/回补跳过）
   → 异步 AI 摘要（可选）
 ```
 
@@ -937,11 +983,18 @@ ai:
   timeout_seconds: 60
   max_input_chars: 12000
   daily_call_limit: 200
+  prompts:                # REQ-042：空字符串 = 系统默认；任务指令可编辑
+    summary_bullets: ""
+    summary_one: ""
+    digest_batch: ""
+    digest_merge: ""
 ```
 
 - 标准 `POST {base_url}/chat/completions`，兼容 DeepSeek / OpenRouter / 自建 vLLM。
-- 摘要按源开启，可配 prompt 模板；同一 `(item_id, kind)` 只调用一次，除非手动重跑。
-- prompt 固定模板，Feed 正文包在明确边界内，视为不可信输入；输出按纯文本/Markdown 渲染，不当 HTML。
+- 摘要按源开启；同一 `(item_id, kind)` 只调用一次，除非手动重跑。
+- 提示词分两层：system 角色、任务声明、正文/素材包裹与 `<<<BEGIN_UNTRUSTED_CONTENT>>>` 边界由服务端固定；用户只能编辑任务指令（输出要求/语气）。`GET /settings` 返回 `ai.prompts` 与只读 `ai.prompt_defaults`，`PATCH /settings` 接受 `ai.prompts`，单项上限 4000 字符。
+- 摘要、定时报告的分批要点/最终简报、关注源 AI 总结共用上述配置；修改只影响之后生成的结果，已缓存结果不自动重算。
+- 翻译提示词暂不开放。Feed 正文始终包在明确边界内，视为不可信输入；输出按纯文本/Markdown 渲染，不当 HTML。
 - 失败不影响条目入库，UI 显示重试；日志不输出 `api_key` 与完整请求体。
 - 每日调用上限与本月累计 token 在设置弹窗展示，超限停止并提示。
 - `secret.key` 丢失等于已存 `api_key` 报废：备份策略包含它，并在恢复文档中提示该风险。

@@ -64,7 +64,7 @@
 | RSS 2.0 / Atom / JSON Feed | `gofeed` + 条件请求 | 无 | 免费 | 高（取决于源站） | 已验证 | 无 |
 | Bluesky | 官方 profile RSS（bsky.app），FxEmbed 镜像降级 | 无 | 免费 | 高 | 已验证 | fxbsky.app 镜像 |
 | Threads | 自建 RSSHub 或公共 RSSHub `/threads/{user}`（匿名） | 无 | 免费 | 低-中（依赖实例与上游反爬） | 已验证（2026-11-02 公共实例 + 本系统抓取管线） | 公共实例 / 上游反爬（见 §2.6） |
-| X / Twitter | FxTwitter 公共 API | 无 cookie | 免费 | 中 | 已验证 | 自动降级 `fixupx.com`（FxEmbed 镜像） |
+| X / Twitter | FxTwitter 公共 API | 无 cookie | 免费 | 中 | 已验证 | 自动降级 `fixupx.com`（FxEmbed 镜像）；头像降级链含 unavatar.io（§3.3.2） |
 | FxEmbed 自建 | Wrangler `dev --local` / Cloudflare Workers | 无（可选凭据） | 免费 | 中 | 部分验证 | 公共 API |
 | 微信公众号（强制登录） | 微信读书扫码通道（唯一内置通道，`wechat://<fakeid>`）；BestBlogs 目录优先 | 微信读书扫码 Cookie（加密存 settings） | 免费 | 中 | 部分验证（httptest 全链；真实扫码/外部号待验收） | 列表 `-2041` 时降级 cover 最新一篇，cover 也失败才 4h 冷却；BestBlogs 未收录号粘贴文章链接添加 |
 | 无登录公众号路径（不采用） | 公开专辑 / 公开主页 / Wechat2RSS | 无 | 免费 | 低-中 | 已验证（列表） | 已排除，仅备查 |
@@ -73,11 +73,12 @@
 | 微信公众号文章直链 | `mp.weixin.qq.com/s?...` | 无 | 免费 | 低 | 受阻 | 不做 |
 | RSSHub | `rsshub://` 链接映射为 https 后按标准 RSS 抓取 | 视路由 | 免费 | 低（公共实例） | 已验证（2026-11-02 公共实例 + 本系统解析） | 自建 / 自定义实例 |
 | Instagram | 自建 RSSHub `/instagram/2/{user}` 或 RSS-Bridge，需要 Instagram 登录态 | 账号 Cookie（`IG_COOKIE`） | 免费 | 低 | 受阻（2026-11-02 公共实例 404/503；需登录态） | 不提供内置路径（见 §2.9） |
-| Apple Podcasts | iTunes Lookup API 取 `feedUrl`，再走标准 RSS | 无 | 免费 | 高 | 已验证（2026-11-02 Lookup + Rill 端到端 5 条） | 直接填 RSS（见 §2.10） |
-| 小宇宙 | 优先官方分发 Feed `feed.xyzfm.space/{token}`；页面 SSR 最近 15 条降级 | 无 | 免费 | 中（分发 Feed 高，页面解析中） | 已验证（2026-11-02 Feed 发现/SSR + Rill 端到端 5 条） | 页面 SSR / 手动 RSS（见 §2.11） |
+| Apple Podcasts | iTunes Lookup API 取 `feedUrl`，再走标准 RSS | 无 | 免费 | 高 | 已验证（2026-11-02 Lookup + Rill 端到端 5 条） | 直接填 RSS（见 §2.10）；feedUrl 为小宇宙托管时随 §2.11 降级 |
+| 小宇宙 | 优先官方分发 Feed `feed.xyzfm.space/{token}`；页面 SSR 最近 15 条降级 | 无 | 免费 | 中（**2026-11-21 分发 Feed 被上游 IP 白名单拒绝，当前不可用**） | 部分验证（2026-11-02 Feed 200；2026-11-21 起 302 denied by IP ACL） | 页面 SSR 自动降级（site_url 可恢复 pid）/ 手动 RSS（见 §2.11） |
 | 微博 | **已移除（2026-11-08）** | — | — | — | 历史：2026-11-02 访客态验证；间歇风控后移除 | 自建 RSSHub + Cookie（见 §2.12） |
 | Medium | 主页 URL 归一化为 `/feed/@user` | 无 | 免费 | 高 | 部分验证（2026-11-02 Feed 200） | 手动 RSS |
 | Mastodon | 主页 URL 归一化为 `@{user}.rss` | 无 | 免费 | 高（实例相关） | 部分验证（2026-11-02 Feed 200） | 手动 RSS |
+| 邮箱自动同步（IMAP） | IMAP 客户端轮询（每个账号一个 `imap://{username}` 源，`go-imap/v2` + 标准库 MIME） | 用户邮箱客户端授权码（按账号 AES-GCM 加密存 settings） | 免费 | 高（取决于邮箱厂商） | 已实现（本地验证，2026-11-21；真实邮箱待验收） | 支持多账号；自动同步 INBOX 与自定义文件夹，排除已发送/草稿/垃圾箱/垃圾邮件；可设单次同步数量；UID 增量、不改邮箱已读状态；远程图片默认拦截、单封放行按条目持久化、按发件人放行持久化；授权码失效置 auth 并提示重配（见 §2.17） |
 
 ---
 
@@ -105,6 +106,7 @@
 - 输出：
   - 每个源可输出 RSS 2.0、Atom 1.0、JSON Feed 1.1。
   - OPML 2.0 导入/导出。
+- 地址编辑（2026-11-23，REQ-044）：编辑弹窗可修改 `feed_url`；保存时按源类型校验、大小写不敏感去重，清空 ETag/Last-Modified/图标与失败状态后立即抓取。成功后源名称（未显式改名时）、`site_url` 与图标跟随新 Feed 更新，旧条目保留。`imap://` 邮箱源地址由邮箱设置管理，不在此编辑。
 
 ### 2.2 实测记录（2026-10-31）
 
@@ -311,14 +313,25 @@
 
 ### 2.11 小宇宙（2026-11-02 调研）
 
-- 状态：已验证（2026-11-02，分发 Feed + 页面降级）
+- 状态：部分验证（2026-11-21 分发 Feed 被上游 IP 白名单拒绝，页面降级路径可用；见 BUG-003）
+- **2026-11-21 上游变更（BUG-003）**：`feed.xyzfm.space` 对非白名单出口 IP 返回
+  302（`X-Tengine-Error: denied by IP ACL = not in whitelist`）→ HTTP 200 的
+  HTML 拒绝页，与 User-Agent 无关（ApplePodcasts/Overcast/浏览器 UA 全部被拒）。
+  本机 4 种 UA 复现一致。官方分发 Feed 当前对自托管出口不可用；Apple 解析出的
+  小宇宙托管 feedUrl（如「忽左忽右」`feed.xyzfm.space/cv4bkgpuglwp`）同样命中。
+  Rill 已做运行时自动降级（见下）。
 - 官方按 podcast id 的公开 RSS/API：**未发现**。
-- 首选入口：`https://feed.xyzfm.space/{token}`，标准 RSS 2.0，无鉴权。
-  - 实测 `feed.xyzfm.space/j7d9mlny9ea6` → **200 application/xml**，41 条；
+- 首选入口（上游恢复前不可依赖）：`https://feed.xyzfm.space/{token}`，标准 RSS 2.0，无鉴权。
+  - 实测 2026-11-02 `feed.xyzfm.space/j7d9mlny9ea6` → **200 application/xml**，41 条；
     `enclosure` 指向 `audio/mp4`；`guid` 等于小宇宙 `eid`。
-  - 实测 `feed.xyzfm.space/mcnun9bubfhb` → **200**，57 条，与页面 `episodeCount=57` 一致。
+  - 实测 2026-11-21 同一 URL → **302 denied by IP ACL**，跳转 HTML 页。
   - 不是每个节目都有：需要从 Apple 目录反查，并校验 feed `<link>` 回指
     `/podcast/{pid}`；Apple Search API 约 20 次/分钟。
+- **自动替换订阅方式（2026-11-21，BUG-003 第二轮修复）**：`fetchSource` 对
+  `feed.xyzfm.space/` 源抓取失败时，恢复节目 pid（site_url 节目页，或从条目里的
+  单集链接 `xiaoyuzhoufm.com/episode/{eid}` 抓单集页反查——覆盖 Apple 解析源），
+  然后**永久改写源**为 `xiaoyuzhou://podcast/{pid}` 页面抓取源（备注写明），
+  此后不再请求被拒的 Feed；pid 恢复失败才报错。
 - 降级入口：节目页面 `https://www.xiaoyuzhoufm.com/podcast/{pid}`
   - `__NEXT_DATA__` → `props.pageProps.podcast`。
   - 实测 `episodeCount=652` 的节目页面只返回 **15** 条 `episodes`；`?page=2` 被忽略。
@@ -516,6 +529,28 @@ https://fxtwitter.com/{handle}/media.xml?count=50
 - 实测：`@example_user`（69 帖账号）在本系统切 `full` 后 60 秒内入库 **69 条**
   （窗口 20 → 全部 69），状态 ok。
 - 限制：每页 20 条 → 3200 条需 ~160 页（页间 300ms，全程约 1 分钟）；仅公开账号。
+
+### 3.3.2 源头像降级链（2026-11-21，BUG-004）
+
+- 背景：部分 X 源头像显示失败（C1ownhjj、HiTw93 等）。头像候选链原为
+  Feed `<image>`（`pbs.twimg.com`）→ `x.com` 页面 icon → `x.com/favicon.ico` →
+  `fxtwitter.com/favicon.ico`；微服出口无法直连 `pbs.twimg.com` / `x.com` 时前三个
+  候选全部失败，且每个候选 15s 超时，整链最长 ~60s，浏览器等待期间即判定失败。
+  本机直连 `pbs.twimg.com/profile_images/...` 实测 200 `image/jpeg`，失败仅发生在
+  微服出口网络。
+- 修复：候选链在 Feed 图标之后插入 `https://unavatar.io/x/{handle}`
+  （第三方聚合服务，实测 200 `image/jpeg` 返回真实头像），置于 `x.com` 站点探测
+  之前；图标候选级超时收敛为 6s，最坏 ~30s 内落到可用候选。
+- 已知取舍：unavatar.io 为第三方依赖，无 SLA；找不到头像时返回其占位图。
+- 实测记录：2026-11-21 `unavatar.io/x/HiTw93` → 301 → 200 `image/jpeg`
+  26,833 bytes；`fxtwitter.com/{handle}/favicon.ico` → 302 跳 `x.com`（不可用作
+  头像）；`api.fxtwitter.com/{handle}` 返回的 avatar_url 仍是 `pbs.twimg.com`
+  域名（无助于绕过）。
+- 2026-11-22 BUG-007 修正候选顺序：FxTwitter Feed 的 `<image>` 会长期停留在旧
+  头像（`@poteto` 实测 Feed 图为旧照片，`api.fxtwitter.com/poteto` 与
+  `unavatar.io/x/poteto` 均为当前插画头像）。X 源改为先取
+  `unavatar.io/x/{handle}`，Feed `<image>` 只作降级；启动清理、抓取后 6 小时失效与
+  手动刷新清缓存继续生效。代价是头像正确性依赖 unavatar 的时效性。
 
 ### 3.4 已知限制
 
@@ -806,9 +841,9 @@ UI 文案：
 | 成本 | 免费；无额外容器/镜像 |
 | 限流 | 文章正文间隔 2s；列表 `-2041` 先降级 cover，cover 也 `-2041` 才触发 4 小时通道冷却；公众号源刷新下限 30 分钟 |
 | 去重键 | `reviewId`；缺失时 canonical 原文链接 |
-| 媒体处理 | 正文 HTML 图片走既有 `/media/` 代理与缓存 |
+| 媒体处理 | 正文 HTML 图片重写为 `/media/{token}/{hash}` 并登记 `media_cache`，由服务端无 Referer 下载缓存；`<img>` 同时带 `referrerpolicy="no-referrer"`。`mmbiz.qpic.cn` 按 Referer 防盗链，浏览器直连时若带 Rill 域名 Referer 会返回「未经允许不可引用」占位图（BUG-002）。`data:` 内联图片不代理 |
 | 降级 | 列表 `-2041` → `/api/mp/cover` 最新一篇（正文也失败则保留标题/链接）；cover 也失败 → 4h 冷却。BestBlogs 目录源（kind=rss）不受影响 |
-| 已知限制 | 接口非公开；收录不全且可能滞后；`/web/mp/articles` 可能被 `-2041` 风控/频控拦截（**不是登录验证码**，也不要求用户完成验证）——列表被拦截时自动降级 `/api/mp/cover` 只同步最新一篇，cover 也失败才进入 4h 冷却；`-2012` 过期（登录成功时先做 Cookie 校验，避免保存无效会话）；`-2042` 未收录；不能承诺历史回补 |
+| 已知限制 | 接口非公开；收录不全且可能滞后；`/web/mp/articles` 可能被 `-2041` 风控/频控拦截（**不是登录验证码**，也不要求用户完成验证）——列表被拦截时自动降级 `/api/mp/cover` 只同步最新一篇，cover 也失败才进入 4h 冷却；`-2012` 过期（登录成功时先做 Cookie 校验，避免保存无效会话）；`-2042` 未收录；不能承诺历史回补。存量文章若在修复前已入库，正文仍保留远程图片地址，依赖前端 `no-referrer` 显示；只有删除源后重建或条目重新入库，才会转为 `/media` 缓存 |
 | 合规备注 | 仅读取用户微信读书账号可见内容，个人阅读使用；Cookie 不返回前端、不写日志 |
 
 ### 4.7 BestBlogs 托管公众号 Feed（2026-11-03，仅标准 RSS）
@@ -930,3 +965,22 @@ RSSHub 实例与凭据，后续单独立项，不计入本批“稳定订阅”�
 - 降级：原文页 4xx/5xx、反爬、超时、非 HTML、提取失败均不影响条目入库，保留 Feed 摘要。
 - 限制：首次抓取最多处理 12 条新文章，剩余条目仍是摘要；不保证登录墙、付费墙、强反爬站点；不改变 Feed 输出与全文搜索索引的既有语义。
 - 实测：2026-11-12 本地单测覆盖 article 选择、导航/页脚剔除与按需抓取端点；真实站点批量提取待验收。
+
+### 2.17 邮箱自动同步（IMAP，2026-11-21，REQ-041）
+
+- 状态：已实现（本地验证；真实邮箱端到端验收前不得标「已验证」）。
+- 实现方式：`github.com/emersion/go-imap/v2` 客户端经 TLS 连接用户配置的邮箱（993），`LIST` 后遍历所有可同步文件夹；`BODY.PEEK[]` 拉全文，不发送 `STORE \Seen`。首次按序列号取账号同步上限内的最新邮件建立基线，之后按 `UIDVALIDITY + LastUID` 增量拉取。MIME 解析用标准库 `net/mail` + `mime/multipart` + `mime.WordDecoder`。
+- 入口/端点：设置页「邮箱同步」可添加多个账号（上限 10 个），各自配置 host/port/账号/授权码/轮询间隔/单次同步数量/可选分组；不再提供文件夹参数。每个账号一个 `imap://{username}` 源，`kind=rss`（不新增 kind、无 schema 迁移）。
+- 同步范围：`INBOX` 与所有自定义文件夹；排除已发送、草稿、垃圾箱、垃圾邮件及 `\All`/`\Flagged` 等虚拟视图。单文件夹最多 100 封/轮，单轮上限跟随账号设置（10–500，默认 60）。
+- 源命名与分组：源名 = 邮箱账号；每个账号可选归入一个 Rill 分组，不选则未分组。旧版按发件人源保留内容但自动停用；移除账号时停用其源并保留内容。
+- 鉴权：IMAP LOGIN，使用邮箱客户端授权码/应用密码；SecretBox AES-GCM 按账号加密存 `settings`（键 `email_password_enc:{account_id}`，旧版回退 `email_password_enc`），接口只返回 `password_set`。
+- 成本：仅微服出站网络与内存计算，零外部 API 成本。
+- 限流：每个账号独立轮询，默认 15 分钟（下限 5 分钟）；空轮询交互 < 1KB。同步游标按账号存 `settings` 键 `email_sync_state:{account_id}`。
+- 数据字段：`guid=Message-ID`（缺失用 `SHA-256(From+Subject+Date)`）；`title=Subject`（RFC 2047 解码）；`author=From` 友好名；`published_at=Date`；`link` 优先 `Archived-At`，次选正文「View in browser」链接，兜底空。
+- 去重键：`Message-ID`；入库复用 `applyFeedResult` 的 `(source_id, guid)` upsert，过滤规则/关注提醒/保留策略自动生效。
+- 媒体处理：`multipart/related` 内联附件（`cid:`）写入媒体缓存目录并直插 `media_cache` `status='ok'` 行，正文引用重写为 `/media/{token}/{hash}`，并标记 `data-inline-image=1`；远程图片也保留 `data-remote-src` 原始地址。非内联附件仅登记缓存不入正文。邮件正文使用专用清洗：保留安全的内联样式、`background`、表格/字体布局标签与 `data:image/...;base64`；协议相对地址补全、仅 `srcset` 时取首个候选、CID 图片按内容嗅探兼容错误 Content-Type（BUG-008）。
+- 正文展示：邮件正文使用 `is-email` 样式，嵌套布局表格不再逐层描边；远程图片默认拦截（含 CSS 背景图），阅读器提供「显示图片」与「始终显示此发件人的图片」。「显示图片」把该条目 `media_json.email_images_allowed` 置为 true（`PATCH /items/{id}/email-images`），之后重新打开该邮件仍直接显示；「始终显示此发件人的图片」把发件人地址写入 `settings.email.trusted_senders`，后续该发件人的邮件自动放行。放行后优先使用 `/media` 代理，加载失败时回退 `data-remote-src` 原图。
+- 降级方案：仅 `text/plain` 时按段落转 `<p>`；正文经 `SanitizeContent` 清洗；LOGIN 失败置 `last_status=error` 并提示「检查客户端授权码」；单文件夹失败跳过并保留其旧游标，单封失败下轮重试。
+- 实测记录：2026-11-21 本地单测覆盖（`TestParseEmailMessage` multipart/CID/RFC2047、`TestBuildEmailFeedItemRewritesCID` 清洗与媒体重写、`TestParseEmailQuotedPrintableAndCharset` GBK、`TestEmailSettingsPatchValidationAndRedaction` 多账号/加密/打码/停用旧源/放行列表、`TestEmailItemRoutingWithoutIMAPServer` 入库与去重、`TestSyncableMailboxesExcludesSystemFolders` 文件夹过滤、`TestEmailSyncStateResetsOnAccountChange` 游标隔离）；2026-11-23 新增 `TestPatchItemEmailImagesPersists` / `TestPatchItemEmailImagesRejectsNonEmail` 覆盖单封放行持久化（本地通过）。真实邮箱（163/QQ/Outlook 任一）端到端同步待验收后补记（日期/账号类型/文件夹数/拉取条数）。
+- 已知限制：首次同步不回溯全部历史；单次同步数量受账号设置约束；不自建 SMTP 收信（25 端口在家庭宽带/云环境封禁，无 MX/PTR）；Gmail 需微服出口可达 Google；被邮箱厂商投进垃圾箱的信件收不到；授权码与邮箱密码是两个东西，网页登录密码不可用。
+- 合规备注：用户授权读取自己邮箱中的邮件，属个人阅读用途；凭据与同步游标只在微服本地加密保管，不进 OPML 导出。

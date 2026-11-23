@@ -56,11 +56,18 @@
 | REQ-037 | 关键字/正则过滤规则 | P1 | 进行中（后端完成本地验证；前端进行中） | 迁移 7 新增 `filter_rules` 与 `items.hidden`；入库后按源评估 mark_read/hide，支持 folder 范围、存量应用、命中计数；默认列表/统计/报告排除隐藏，`?hidden=1` 已过滤视图，PATCH state hidden:false 恢复 | [REQ-037](requirements/REQ-037-keyword-filters.md)、PRD F-18、PDD §4/§9、DEC-027 | 前端「自动化」分类、真机验收 |
 | REQ-038 | MCP 服务与正文 Markdown 导出 | P1 | 已实现（本地验证；真实 Agent/真机待验收） | 设置新增「MCP」分类；迁移 10 新增 `mcp_tokens`（多命名 Token、SHA-256 哈希、可启停/吊销）；`/mcp` 使用 MCP Streamable HTTP（SSE）+ Bearer Token，工具覆盖读取与写入但不提供删除，也不暴露密钥/设置/备份恢复；`GET /items/{id}/markdown` 导出原文 Markdown，前端复制/下载（blob + 懒猫 file-chooser inject） | [REQ-038](requirements/REQ-038-mcp-and-markdown-export.md)、PRD F-50/F-51、PDD §4.2/§5.2/§12.3/§12.4、DEC-029 | 真实外部 Agent 连接、真机 file chooser、长连接与超时观测；LPK `0.1.4` 已打包（sha256 `31d960b8…`），未安装 |
 | REQ-039 | 侧栏订阅源树与阅读效率扩展 | P1 | 已实现（本地验证；真实浏览器/触屏待验收） | 树右键/长按编辑删除与拖拽归类；侧栏多选批量、搜索、分组未读/失败聚合、全部已读、失败重试、折叠持久化、保存视图、分组 OPML；列表多选与跨源重复合并；`⌘K` 命令面板；每源全文抓取；迁移 11 新增稍后读/笔记/内联高亮/朗读；MCP 移动与重排工具。跳过搜索语法、过滤自动归组、源排序/删除撤销、Newsletter | [REQ-039](requirements/REQ-039-sidebar-tree-context-drag.md)、PRD F-17/F-26/F-30/F-52/F-53/F-54、DESIGN §页面结构、PDD §4.2/§5.2/§6.5 | 真实浏览器批量/拖拽/命令面板/OPML、真实站点全文提取、朗读、真实 MCP Agent；未重新打包 LPK |
+| REQ-040 | 置顶订阅源与关注源即时提醒 | P1 | 已实现（本地验证；真实渠道/浏览器待验收） | 侧栏全局「置顶」区（`settings.reader.pinned_sources`，不新增 schema）；源级「关注更新」写入 `sources.config_json`，新条目入库后按「每篇一条 / 每次抓取合并一条」推送现有飞书/Webhook，可选 AI 单篇或批次总结；关注源未读显示 dot；首次抓取、回补、过滤已读/隐藏不提醒；关注源支持多选批量管理、添加时多选源 | [REQ-040](requirements/REQ-040-pinned-and-watched-sources.md)、PRD F-55/F-56、PDD §4.2/§5.2/§9.1、DEC-031 | 真实飞书/Webhook、AI 供应商、桌面/移动端交互验收 |
+| REQ-041 | 邮箱自动同步（IMAP，多账号） | P1 | 已实现（本地验证；真实邮箱端到端待验收） | 设置新增「邮箱同步」分类：最多 10 个 IMAP 账号，各自配置服务器/授权码/轮询间隔/单次同步数量（10–500，默认 60）/分组；每个账号一个以账号命名的源；自动同步 INBOX 与所有自定义文件夹，排除已发送/草稿/垃圾箱/垃圾邮件；按 `UIDVALIDITY + LastUID` 增量拉取（单文件夹 100 封/轮），`Message-ID` 去重、RFC 2047 标题、CID 内嵌图入媒体缓存；使用 `BODY.PEEK`，不改动邮箱已读状态；邮件正文收敛嵌套表格边框，远程图片默认拦截并可单次/按发件人放行；`kind=rss` 不新增 schema；邮件条目复用过滤/关注提醒/保留管线；不自建 SMTP 收信 | [REQ-041](requirements/REQ-041-newsletter-email-subscription.md)、PRD F-57、PDD §7.7、[RSS-SOURCES](RSS-SOURCES.md) §2.17 | 多邮箱真实同步、同步数量生效、图片放行与正文视觉、真机浏览器 UI 验收 |
+| REQ-042 | 自定义 AI 提示词 | P1 | 已实现（本地验证；真实 AI/浏览器待验收） | 设置 → AI 新增提示词编辑：文章摘要（要点列表/一句话）、定时报告分批与最终简报；关注源 AI 总结复用摘要/报告提示词；只开放任务指令，系统角色与不可信内容边界固定；`settings.ai.prompts` 存储、空值回退默认，API 同时返回只读 `prompt_defaults`；不新增 schema | [REQ-042](requirements/REQ-042-custom-ai-prompts.md)、PRD F-58、PDD §10、DEC-034 | 真实 AI 供应商生成效果、桌面/移动端设置交互验收 |
+| REQ-043 | 订阅源 filetree 查看详情入口 | P2 | 已实现（本地验证；真实浏览器待验收） | 设置 → 订阅源每个源行新增 `activity` 图标按钮「查看 {源名} 详情」，跳转 `/sources/{id}`；多选模式不显示；桌面弹窗与移动端设置共用；不新增 API/schema | [REQ-043](requirements/REQ-043-source-tree-detail-entry.md)、PRD F-01/F-07、REQ-020 | 桌面/移动端入口位置与跳转验收 |
+| REQ-044 | 订阅地址编辑与邮件图片放行持久化 | P1 | 已实现（本地验证；真实浏览器/邮箱待验收） | 编辑源弹窗可修改 `feed_url`（邮箱同步源除外）：校验/去重、清缓存与失败状态、立即抓取，成功后更新名称（未显式改名时）/站点/图标；邮件「显示图片」按条目写 `media_json.email_images_allowed`，按发件人放行继续写 `trusted_senders`，之后都持续显示；不新增 schema | [REQ-044](requirements/REQ-044-source-url-edit-and-email-image-allow.md)、PRD F-01/F-57、PDD §5.2/§7.7、DEC-035 | 真实浏览器编辑地址、真实邮箱图片放行验收 |
+| REQ-045 | 刷新后恢复订阅源与文章阅读上下文 | P1 | 已实现（本地验证；真实浏览器待验收） | localStorage 记住阅读筛选（源/分组/全部/未读/收藏/稍后读/已读）、已读状态与最近文章 ID；刷新 `/items/{id}` 保持文章路由与源列表；刷新 `/` 自动回到最近文章；一次加载只恢复一次，应用内回列表不强制跳文章；删除的源/分组回退「全部」；退出登录清除；不新增 API/schema | [REQ-045](requirements/REQ-045-reader-context-restore.md)、PRD F-30/F-35、PDD §6.5 | 桌面/移动端刷新、登录跳转与删除源回退验收 |
 
 ## 暂不纳入当前基线
 
 - 多用户与账号体系：只接入懒猫 OIDC，不做 Rill 自己的用户表、角色或邀请。
-- 后续 P1/P2 能力（全文提取、通知、标签、播客、视频代理、网盘归档等）：尚未进入当前 REQ。
+- 后续 P1/P2 能力（标签、视频代理、网盘归档等）：尚未进入当前 REQ。
+- 通知通道（懒猫系统消息、浏览器 Web Push）暂不纳入 REQ-040；本轮只复用飞书/Webhook。
 
 ## 当前剩余阻塞
 
@@ -72,6 +79,7 @@
 - REQ-034 公众号：真实微信读书扫码回调、外部公众号列表/正文端到端、验证码与 Cookie 过期待验收。
 - REQ-035 创作者搜索：真实浏览器搜索→多选→批量订阅→源树刷新待验收；微博泛搜索未实现，YouTube/小宇宙/公众号仅覆盖 BestBlogs 目录；平台长期限流待观察。LPK v0.1.2 已于 2026-11-04 重打包（sha256 `0669603f…`），未安装。
 - REQ-038 MCP / Markdown：本地单测与官方 MCP Go 客户端握手通过；真实 Claude Desktop/Codex 连接、SSE 长连接、超时行为与真机懒猫文件保存弹层待验收；LPK 未重打包。
+- REQ-040 置顶/关注提醒：本地 Go 测试、前端类型检查/61 项 Vitest/构建通过；真实飞书/Webhook 推送、AI 供应商总结、桌面与移动端置顶交互待验收。
 
 ## 使用规则
 
