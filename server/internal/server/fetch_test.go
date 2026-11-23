@@ -150,6 +150,9 @@ func TestRSSFetchDedupeSanitizeAndMedia(t *testing.T) {
 	if !strings.Contains(detail.ContentHTML, "/media/") {
 		t.Fatalf("content not rewritten: %s", detail.ContentHTML)
 	}
+	if !strings.Contains(detail.ContentHTML, `referrerpolicy="no-referrer"`) {
+		t.Fatalf("article image missing no-referrer: %s", detail.ContentHTML)
+	}
 	if strings.Contains(strings.ToLower(detail.ContentHTML), "<script") ||
 		strings.Contains(strings.ToLower(detail.ContentHTML), "onerror") ||
 		strings.Contains(strings.ToLower(detail.ContentHTML), "javascript:") {

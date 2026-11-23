@@ -50,6 +50,7 @@ func (a *App) fetchSource(ctx context.Context, id int64, manual bool, overrideUR
 	startReal := time.Now()
 	var result *fetch.FeedResult
 	var fetchErr error
+	emailHandled := false
 	fallbackURL := ""
 	if source.FallbackURL != nil {
 		fallbackURL = strings.TrimSpace(*source.FallbackURL)
@@ -64,6 +65,11 @@ func (a *App) fetchSource(ctx context.Context, id int64, manual bool, overrideUR
 		result, fetchErr = a.fetchWechatSource(ctx, source)
 	} else if strings.HasPrefix(source.FeedURL, "xiaoyuzhou://podcast/") {
 		result, fetchErr = a.fetchXiaoyuzhou(ctx, source)
+	} else if strings.HasPrefix(source.FeedURL, "imap://") {
+		// REQ-041：邮箱同步源。syncEmailMailbox 内部完成抓取与入库，
+		// 返回 nil 表示无需外部再走 applyFeedResult。
+		fetchErr = a.syncEmailMailbox(ctx, source)
+		emailHandled = fetchErr == nil
 	} else if strings.HasPrefix(source.FeedURL, "weibo://user/") {
 		// 微博渠道已移除（2026-11-08 用户决策）；存量源由启动迁移统一停用，
 		// 这里兜底给出明确原因，避免报成普通抓取失败。
@@ -116,6 +122,20 @@ func (a *App) fetchSource(ctx context.Context, id int64, manual bool, overrideUR
 			}
 		}
 	}
+	// 小宇宙分发 Feed 上游 IP 白名单（2026-11-21 实测 denied by IP ACL）：
+	// 恢复节目 pid 并【永久替换】订阅方式为页面抓取源。必须在失败处理之前完成，
+	// 否则替换成功 + 页面抓取成功仍会被当成失败返回（0.1.10 实测缺陷）。
+	if fetchErr != nil && isXiaoyuzhouFeedURL(source.FeedURL) {
+		if replaced, replacedPid, replaceErr := a.replaceXiaoyuzhouFeedSource(ctx, source); replaceErr == nil {
+			source = replaced
+			if replacedResult, replacedFetchErr := a.fetchXiaoyuzhou(ctx, source); replacedFetchErr == nil {
+				result, fetchErr = replacedResult, nil
+				overrideURL = "xiaoyuzhou://podcast/" + replacedPid
+			} else {
+				fetchErr = replacedFetchErr
+			}
+		}
+	}
 	duration := time.Since(startReal).Milliseconds()
 	if fetchErr != nil {
 		type statusCoder interface{ StatusCode() int }
@@ -125,6 +145,14 @@ func (a *App) fetchSource(ctx context.Context, id int64, manual bool, overrideUR
 			httpStatus = coded.StatusCode()
 		}
 		message := readableFetchError(fetchErr, source.Kind)
+		if isXiaoyuzhouFeedURL(source.FeedURL) {
+			message = "小宇宙分发 Feed 被上游 IP 白名单拒绝（denied by IP ACL），且无法自动恢复小宇宙节目 ID"
+			if source.SiteURL != nil && strings.Contains(*source.SiteURL, "podcasts.apple.com") {
+				message += "；可用小宇宙节目链接重新订阅以走页面抓取"
+			}
+		} else if strings.HasPrefix(source.FeedURL, "xiaoyuzhou://podcast/") {
+			message = "订阅已自动改用小宇宙页面抓取，但节目页暂时无法访问：" + message
+		}
 		if fallbackErr != nil {
 			message = fmt.Sprintf(
 				"主源 %s 失败：%s；降级源 %s 失败：%s",
@@ -141,14 +169,24 @@ func (a *App) fetchSource(ctx context.Context, id int64, manual bool, overrideUR
 		}
 	}
 	var applyErr error
-	if result.NotModified {
+	if fetchErr == nil && emailHandled {
+		applyErr = a.applyEmailSourceOK(ctx, source, started, duration)
+	} else if result.NotModified {
 		applyErr = a.applyNotModified(ctx, source, started, duration, overrideURL)
 	} else {
 		a.enrichFullText(ctx, source, result.Items)
-		_, _, applyErr = a.applyFeedResult(ctx, source, result, started, duration, overrideURL)
+		_, _, applyErr = a.applyFeedResult(ctx, source, result, started, duration, overrideURL, source.InitialFetched && source.WatchEnabled)
 	}
 	if applyErr != nil {
 		return Source{}, internalError(applyErr)
+	}
+	// BUG-004：抓取成功说明出口可用，清除图标失败标记，让下一轮
+	// 图标请求立即用新候选链重试（旧失败标记会拦截最长 1 小时）。
+	a.clearIconFailure(id)
+	// X 源头像候选链在 2026-11-21 更新过；此前成功缓存的多是通用站点图标。
+	// 图标默认按 7 天 TTL 不重抓，这里对 X 源按 6 小时失效，让新头像尽早替换。
+	if isXFeedURL(source.FeedURL) {
+		a.invalidateOldIcon(id, 6*time.Hour)
 	}
 	updated, err := a.getSource(ctx, id)
 	if err != nil {
@@ -284,7 +322,7 @@ func (a *App) applyNotModified(ctx context.Context, source dbSource, started tim
 	next := nextFetchTime(a.now(), source.RefreshSeconds)
 	var note any
 	if override != "" {
-		note = "已自动降级到 " + sourceHostLabel(override)
+		note = degradedSourceNote(override)
 	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -313,10 +351,21 @@ func (a *App) applyNotModified(ctx context.Context, source dbSource, started tim
 	return tx.Commit()
 }
 
-func (a *App) applyFeedResult(ctx context.Context, source dbSource, result *fetch.FeedResult, started time.Time, duration int64, override string) (int, int, error) {
+func (a *App) applyFeedResult(ctx context.Context, source dbSource, result *fetch.FeedResult, started time.Time, duration int64, override string, notifyWatch bool) (int, int, error) {
 	items := result.Items
 	if !source.InitialFetched && len(items) > source.InitialLimit {
 		items = items[:source.InitialLimit]
+	}
+	refreshMeta := false
+	refreshMetaName := false
+	config := map[string]any{}
+	if strings.TrimSpace(source.ConfigJSON) != "" {
+		if err := json.Unmarshal([]byte(source.ConfigJSON), &config); err == nil {
+			refreshMeta, _ = config["refresh_metadata"].(bool)
+			if nameFlag, ok := config["refresh_metadata_name"].(bool); ok {
+				refreshMetaName = nameFlag
+			}
+		}
 	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -326,17 +375,22 @@ func (a *App) applyFeedResult(ctx context.Context, source dbSource, result *fetc
 		_ = tx.Rollback()
 	}()
 	existing := make(map[string]struct{})
-	rows, err := tx.QueryContext(ctx, `SELECT guid FROM items WHERE source_id = ?`, source.ID)
+	emailImagesAllowed := make(map[string]bool)
+	rows, err := tx.QueryContext(ctx, `SELECT guid, COALESCE(media_json, '') FROM items WHERE source_id = ?`, source.ID)
 	if err != nil {
 		return 0, 0, err
 	}
+	isEmailSource := strings.HasPrefix(source.FeedURL, "imap://")
 	for rows.Next() {
-		var guid string
-		if err := rows.Scan(&guid); err != nil {
+		var guid, mediaRaw string
+		if err := rows.Scan(&guid, &mediaRaw); err != nil {
 			_ = rows.Close()
 			return 0, 0, err
 		}
 		existing[guid] = struct{}{}
+		if isEmailSource && decodeMediaPayload(mediaRaw).EmailImagesAllowed {
+			emailImagesAllowed[guid] = true
+		}
 	}
 	if err := rows.Close(); err != nil {
 		return 0, 0, err
@@ -354,9 +408,11 @@ func (a *App) applyFeedResult(ctx context.Context, source dbSource, result *fetc
 		}
 		existing[item.GUID] = struct{}{}
 		mediaJSON, _ := json.Marshal(mediaPayload{
-			Images:    item.MediaURLs,
-			AudioURL:  item.AudioURL,
-			AudioType: item.AudioType,
+			Images:             item.MediaURLs,
+			AudioURL:           item.AudioURL,
+			AudioType:          item.AudioType,
+			EmailSender:        item.EmailSender,
+			EmailImagesAllowed: emailImagesAllowed[item.GUID],
 		})
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO items (
@@ -414,7 +470,7 @@ func (a *App) applyFeedResult(ctx context.Context, source dbSource, result *fetc
 	lastModified := nullableStringValue(result.LastModified)
 	note := any(nil)
 	if override != "" {
-		note = "已自动降级到 " + sourceHostLabel(override)
+		note = degradedSourceNote(override)
 		etag = source.nullableETag()
 		lastModified = source.nullableLastModified()
 	}
@@ -433,6 +489,31 @@ func (a *App) applyFeedResult(ctx context.Context, source dbSource, result *fetc
 		started.UTC().Format(timeRFC3339), lastNew, next.UTC().Format(timeRFC3339),
 		etag, lastModified, note, nullableStringValue(result.IconURL), now.Format(timeRFC3339), source.ID); err != nil {
 		return 0, 0, err
+	}
+	if refreshMeta {
+		metadataUpdates := make([]string, 0, 3)
+		metadataArgs := make([]any, 0, 4)
+		if title := strings.TrimSpace(result.Title); refreshMetaName && title != "" && len([]rune(title)) <= 200 && title != source.Name {
+			metadataUpdates = append(metadataUpdates, "name = ?")
+			metadataArgs = append(metadataArgs, title)
+		}
+		if link := strings.TrimSpace(result.Link); link != "" {
+			if _, err := parseHTTPURL(link); err == nil {
+				metadataUpdates = append(metadataUpdates, "site_url = ?")
+				metadataArgs = append(metadataArgs, link)
+			}
+		}
+		delete(config, "refresh_metadata")
+		delete(config, "refresh_metadata_name")
+		configData, err := json.Marshal(config)
+		if err != nil {
+			return 0, 0, err
+		}
+		metadataUpdates = append(metadataUpdates, "config_json = ?")
+		metadataArgs = append(metadataArgs, string(configData), source.ID)
+		if _, err := tx.ExecContext(ctx, "UPDATE sources SET "+strings.Join(metadataUpdates, ", ")+" WHERE id = ?", metadataArgs...); err != nil {
+			return 0, 0, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO fetch_logs (source_id, started_at, duration_ms, http_status, result, item_count, new_count, error)
@@ -457,7 +538,110 @@ func (a *App) applyFeedResult(ctx context.Context, source dbSource, result *fetc
 		}
 		a.applyFiltersToItems(ctx, source.ID, folderNull, newIDs, newTitles, newContents)
 	}
+	if notifyWatch && len(newIDs) > 0 {
+		// 推送/AI 总结可能耗时数十秒，不能阻塞抓取请求和调度工作池。
+		// 使用 App 根上下文而不是请求上下文，避免手动刷新断开后丢掉提醒。
+		ids := append([]int64(nil), newIDs...)
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			alertCtx := a.ctx
+			if alertCtx == nil {
+				alertCtx = context.Background()
+			}
+			a.notifyWatchedSource(alertCtx, source.ID, ids)
+		}()
+	}
 	return newCount, len(items), nil
+}
+
+// degradedSourceNote explains an automatic degradation in the source note.
+func degradedSourceNote(override string) string {
+	if strings.HasPrefix(override, "xiaoyuzhou://podcast/") {
+		return "已自动改用小宇宙页面抓取（最近 15 条；原分发 Feed 被上游 IP 白名单拒绝）"
+	}
+	return "已自动降级到 " + sourceHostLabel(override)
+}
+
+// xiaoyuzhouPidFromItems recovers the podcast id from stored episode links
+// (https://www.xiaoyuzhoufm.com/episode/{eid}) written by the distribution
+// feed while it was still reachable. The episode page reveals the pid.
+func (a *App) xiaoyuzhouPidFromItems(ctx context.Context, sourceID int64) string {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT COALESCE(url, '') FROM items
+		WHERE source_id = ? AND url LIKE '%xiaoyuzhoufm.com/episode/%'
+		ORDER BY published_at DESC LIMIT 3`, sourceID)
+	if err != nil {
+		return ""
+	}
+	eids := make([]string, 0, 3)
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			continue
+		}
+		if _, eid, _, ok := xiaoyuzhouRefFromInput(raw); ok && eid != "" {
+			eids = append(eids, eid)
+		}
+	}
+	_ = rows.Close()
+	for _, eid := range eids {
+		data, err := a.fetchXiaoyuzhouPage(ctx, "episode", eid)
+		if err != nil {
+			continue
+		}
+		if episode := data.Props.PageProps.Episode; episode != nil {
+			pid := strings.TrimSpace(episode.PID)
+			if pid == "" && episode.Podcast != nil {
+				pid = strings.TrimSpace(episode.Podcast.PID)
+			}
+			if pid != "" {
+				return pid
+			}
+		}
+	}
+	return ""
+}
+
+// replaceXiaoyuzhouFeedSource permanently rewrites a distribution-feed source
+// into a Xiaoyuzhou page-fetch source once the pid is recovered from the site
+// URL or any stored episode link. This is a one-time subscription-method
+// replacement: future fetches go straight to the page adapter and the denied
+// feed is never requested again.
+func (a *App) replaceXiaoyuzhouFeedSource(ctx context.Context, source dbSource) (dbSource, string, error) {
+	pid := xiaoyuzhouPidFromSiteURL(source.SiteURL)
+	if pid == "" {
+		pid = a.xiaoyuzhouPidFromItems(ctx, source.ID)
+	}
+	if pid == "" {
+		return dbSource{}, "", fmt.Errorf("无法从源信息恢复小宇宙节目 ID")
+	}
+	feedURL := "xiaoyuzhou://podcast/" + pid
+	base := strings.TrimSpace(a.xiaoyuzhouBase)
+	if base == "" {
+		base = "https://www.xiaoyuzhoufm.com"
+	}
+	pageURL := base + "/podcast/" + url.PathEscape(pid)
+	var duplicate int
+	if err := a.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM sources WHERE lower(feed_url) = lower(?) AND id <> ?`,
+		feedURL, source.ID).Scan(&duplicate); err != nil {
+		return dbSource{}, "", err
+	}
+	if duplicate > 0 {
+		return dbSource{}, "", fmt.Errorf("已存在同一节目的页面抓取源，请删除其一")
+	}
+	note := "已自动改用小宇宙页面抓取（最近 15 条；原分发 Feed 被上游 IP 白名单拒绝）"
+	if _, err := a.db.ExecContext(ctx, `
+		UPDATE sources SET feed_url = ?, site_url = ?, note = ?, updated_at = ? WHERE id = ?`,
+		feedURL, pageURL, note, a.now().Format(timeRFC3339), source.ID); err != nil {
+		return dbSource{}, "", err
+	}
+	replaced := source
+	replaced.FeedURL = feedURL
+	replaced.SiteURL = &pageURL
+	replaced.Note = ptrString(note)
+	return replaced, pid, nil
 }
 
 func (source dbSource) nullableETag() any {

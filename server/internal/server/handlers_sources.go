@@ -13,6 +13,7 @@ import (
 
 type sourcePatch struct {
 	Name              *string         `json:"name"`
+	FeedURL           *string         `json:"feed_url"`
 	FolderID          json.RawMessage `json:"folder_id"`
 	RefreshSeconds    *int            `json:"refresh_seconds"`
 	FallbackURL       json.RawMessage `json:"fallback_url"`
@@ -22,6 +23,10 @@ type sourcePatch struct {
 	RetentionMaxItems *int            `json:"retention_max_items"`
 	BackfillMode      *string         `json:"backfill_mode"`
 	FullText          *bool           `json:"full_text"`
+	WatchEnabled      *bool           `json:"watch_enabled"`
+	WatchMode         *string         `json:"watch_mode"`
+	WatchAI           *bool           `json:"watch_ai"`
+	WatchChannelIDs   *[]int64        `json:"watch_channel_ids"`
 }
 
 func (a *App) handleListSources(w http.ResponseWriter, r *http.Request) error {
@@ -132,11 +137,47 @@ func (a *App) handleUpdateSource(w http.ResponseWriter, r *http.Request) error {
 	}
 	updates := make([]string, 0, 8)
 	args := make([]any, 0, 10)
+	feedChanged := false
+	if body.FeedURL != nil {
+		feedURL := normalizeRSSHubURL(strings.TrimSpace(*body.FeedURL))
+		if feedURL == "" {
+			return badRequest("url_required", "请输入订阅地址")
+		}
+		if feedURL != current.FeedURL {
+			if strings.HasPrefix(current.FeedURL, "imap://") {
+				return badRequest("invalid_source", "邮箱同步源的订阅地址由「邮箱同步」设置管理")
+			}
+			if err := a.validateSourceURL(r.Context(), current.Kind, feedURL); err != nil {
+				var apiErr *apiError
+				if errors.As(err, &apiErr) && apiErr.Message != "" {
+					return badRequest("invalid_url", "订阅地址无效："+apiErr.Message)
+				}
+				return badRequest("invalid_url", "订阅地址无效")
+			}
+			var duplicate int
+			if err := a.db.QueryRowContext(r.Context(),
+				`SELECT COUNT(*) FROM sources WHERE lower(feed_url) = lower(?) AND id <> ?`,
+				feedURL, id).Scan(&duplicate); err != nil {
+				return internalError(err)
+			}
+			if duplicate > 0 {
+				return conflict("source_exists", "该源已在订阅列表中")
+			}
+			feedChanged = true
+			updates = append(updates,
+				"feed_url = ?", "etag = NULL", "last_modified = NULL", "icon_url = NULL",
+				"last_status = NULL", "last_error = NULL", "fail_count = 0",
+				"initial_fetched = 0", "next_fetch_at = ?", "note = ?")
+			args = append(args, feedURL, a.now().Format(timeRFC3339), "订阅地址已更新，正在抓取新内容…")
+		}
+	}
+	renameRequested := false
 	if body.Name != nil {
 		name := strings.TrimSpace(*body.Name)
 		if name == "" || len([]rune(name)) > 200 {
 			return badRequest("invalid_source", "源名称不能为空且不能超过 200 字")
 		}
+		renameRequested = name != current.Name
 		updates = append(updates, "name = ?")
 		args = append(args, name)
 	}
@@ -238,12 +279,42 @@ func (a *App) handleUpdateSource(w http.ResponseWriter, r *http.Request) error {
 			args = append(args, note)
 		}
 	}
-	if body.FullText != nil {
+	if body.FullText != nil || body.WatchEnabled != nil || body.WatchMode != nil || body.WatchAI != nil || body.WatchChannelIDs != nil || feedChanged {
 		config := map[string]any{}
 		if strings.TrimSpace(current.ConfigJSON) != "" {
 			_ = json.Unmarshal([]byte(current.ConfigJSON), &config)
 		}
-		config["full_text"] = *body.FullText
+		if feedChanged {
+			// ApplyFeedResult uses this marker to adopt the new feed's title,
+			// site URL and icon on the next successful fetch. An explicit rename
+			// in the same request wins over the feed title.
+			config["refresh_metadata"] = true
+			if !renameRequested {
+				config["refresh_metadata_name"] = true
+			}
+		}
+		if body.FullText != nil {
+			config["full_text"] = *body.FullText
+		}
+		if body.WatchEnabled != nil {
+			config["watch_enabled"] = *body.WatchEnabled
+		}
+		if body.WatchMode != nil {
+			if *body.WatchMode != "each" && *body.WatchMode != "batch" {
+				return badRequest("invalid_watch_mode", "关注提醒方式只能是 each 或 batch")
+			}
+			config["watch_mode"] = *body.WatchMode
+		}
+		if body.WatchAI != nil {
+			config["watch_ai"] = *body.WatchAI
+		}
+		if body.WatchChannelIDs != nil {
+			ids, apiErr := normalizeWatchChannelIDs(*body.WatchChannelIDs)
+			if apiErr != nil {
+				return apiErr
+			}
+			config["watch_channel_ids"] = ids
+		}
 		data, err := json.Marshal(config)
 		if err != nil {
 			return internalError(err)
@@ -259,6 +330,18 @@ func (a *App) handleUpdateSource(w http.ResponseWriter, r *http.Request) error {
 	args = append(args, a.now().Format(timeRFC3339), id)
 	if _, err := a.db.ExecContext(r.Context(), "UPDATE sources SET "+strings.Join(updates, ", ")+" WHERE id = ?", args...); err != nil {
 		return internalError(err)
+	}
+	if feedChanged {
+		a.clearSourceIcon(id)
+		// Match source creation: fetch right away so the new address, metadata
+		// and articles are visible without waiting for the next scheduler tick.
+		if !a.disableInitialFetch {
+			fetchCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+			if _, fetchErr := a.fetchSource(fetchCtx, id, true, ""); fetchErr != nil {
+				a.logger.Warn("source URL change fetch failed", "source_id", id, "err", fetchErr)
+			}
+			cancel()
+		}
 	}
 	if startBackfill && !a.disableBackfill {
 		a.startBackfill(id)
@@ -307,6 +390,9 @@ func (a *App) handleFetchSource(w http.ResponseWriter, r *http.Request) error {
 	if fetchErr != nil {
 		return fetchErr
 	}
+	// 手动刷新 = 头像也刷新：清掉图标缓存（含旧失败标记），下次图标请求
+	// 重新走候选链；前端根据 last_fetch_at 变化重新加载图片。
+	a.clearSourceIcon(id)
 	writeJSON(w, http.StatusOK, updated)
 	return nil
 }
@@ -432,6 +518,22 @@ func (a *App) sourceFeedToken(ctx context.Context, id int64) (string, error) {
 
 func sourceFeedPath(id int64, token, extension string) string {
 	return "/feed/" + strconv.FormatInt(id, 10) + "/" + token + "." + extension
+}
+
+func normalizeWatchChannelIDs(ids []int64) ([]int64, *apiError) {
+	seen := make(map[int64]struct{}, len(ids))
+	result := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, badRequest("invalid_channel_ids", "推送渠道 ID 必须是正整数")
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result, nil
 }
 
 func boolInt(value bool) int {

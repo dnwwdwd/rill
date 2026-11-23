@@ -65,7 +65,7 @@ func (a *App) runBackfill(ctx context.Context, id int64) {
 		return
 	}
 	result := &fetch.FeedResult{Title: source.Name, Items: items, HTTPStatus: 200}
-	if _, _, err := a.applyFeedResult(ctx, source, result, a.now(), 0, ""); err != nil {
+	if _, _, err := a.applyFeedResult(ctx, source, result, a.now(), 0, "", false); err != nil {
 		a.logger.Error("backfill apply failed", "source_id", id, "err", err)
 		a.setSourceNote(context.WithoutCancel(ctx), id, "回补失败：结果写入数据库时出错")
 		return

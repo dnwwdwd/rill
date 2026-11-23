@@ -105,6 +105,15 @@ func TestFilterRulesMarkReadAndHide(t *testing.T) {
 	if stats.Hidden != 1 || stats.Total != 1 {
 		t.Fatalf("stats wrong: %+v", stats)
 	}
+
+	// 源列表未读数必须与默认列表一致：被隐藏的未读条目不能继续点亮关注源 dot。
+	var sources []Source
+	client.decode("GET", "/api/v1/sources", nil, false, http.StatusOK, &sources)
+	for _, entry := range sources {
+		if entry.ID == source.ID && entry.UnreadCount != 0 {
+			t.Fatalf("source unread_count = %d, want 0 after hide/read", entry.UnreadCount)
+		}
+	}
 }
 
 func TestFilterRuleFolderScope(t *testing.T) {

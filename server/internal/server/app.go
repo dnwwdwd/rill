@@ -172,6 +172,12 @@ func NewWithOptions(ctx context.Context, cfg config.Config, opts Options) (*App,
 	}
 	app.repairDigestNextRuns(appCtx)
 	app.cleanupSessions(ctx)
+	// BUG-006：旧版本创建的邮件聚合源名为「邮件收集箱」且未分组；启动时
+	// 按当前邮箱文件夹补名/补组，不创建源、不覆盖用户手动改名/移动。
+	app.normalizeEmailSources(ctx)
+	// BUG-004/BUG-007：旧版本可能把 fxtwitter 蓝鸟 favicon 或 Feed 里的旧照片
+	// 缓存成 X 源头像；启动时清理一次，让新候选链（当前头像）立即重新抓取。
+	app.resetLegacyXSourceIcons(ctx)
 	app.static = resolveStaticDir(cfg.WebDir, opts.StaticDir)
 	if !opts.DisableScheduler {
 		app.wg.Add(1)

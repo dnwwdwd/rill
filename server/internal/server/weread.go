@@ -453,13 +453,26 @@ func (a *App) fetchWeread(ctx context.Context, source dbSource) (*fetch.FeedResu
 				return nil, contentErr
 			}
 		}
+		itemURL := firstNonEmpty(article.URL, contentURL)
+		contentHTML := content.ContentHTML
+		contentText := htmlToText(contentHTML)
+		var mediaURLs []string
+		// 微信读书返回的是公众号原始正文 HTML，图片仍指向 mmbiz.qpic.cn。
+		// 浏览器直接加载会被 Referer 防盗链替换成「未经允许不可引用」占位图；
+		// 这里统一走与 RSS 相同的 /media 代理，由服务端无 Referer 下载并缓存。
+		if base, parseErr := url.Parse(itemURL); strings.TrimSpace(contentHTML) != "" && parseErr == nil {
+			if sanitized, text, media := fetch.SanitizeContent(contentHTML, itemURL, base, source.FeedToken); strings.TrimSpace(sanitized) != "" {
+				contentHTML, contentText, mediaURLs = sanitized, text, media
+			}
+		}
 		item := fetch.FeedItem{
 			GUID:        guid,
-			URL:         firstNonEmpty(article.URL, contentURL),
+			URL:         itemURL,
 			Title:       firstNonEmpty(article.Title, content.Title),
 			PublishedAt: article.PublishedAt,
-			ContentHTML: content.ContentHTML,
-			ContentText: htmlToText(content.ContentHTML),
+			ContentHTML: contentHTML,
+			ContentText: contentText,
+			MediaURLs:   mediaURLs,
 		}
 		if article.HasTime {
 			item.PublishedRaw = article.PublishedAt.Format(time.RFC3339)

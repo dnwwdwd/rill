@@ -89,6 +89,54 @@ func (a *App) loadInternalSettings(ctx context.Context) (internalSettings, error
 	if result.Reader.ListWidth < 300 || result.Reader.ListWidth > 520 {
 		result.Reader.ListWidth = 384
 	}
+	if result.Reader.PinnedSources == nil {
+		result.Reader.PinnedSources = []int64{}
+	}
+	if result.Email.BlockRemoteImages == nil {
+		defaultBlock := true
+		result.Email.BlockRemoteImages = &defaultBlock
+	}
+	result.Email.TrustedSenders = normalizeTrustedEmailSenders(result.Email.TrustedSenders)
+	if len(result.Email.Accounts) == 0 && strings.TrimSpace(result.Email.Username) != "" {
+		// REQ-041 初版只支持一个邮箱：把旧字段迁移成第一个账号，授权码
+		// 继续从旧 `email_password_enc` 读取，用户无需重新输入。
+		port := result.Email.Port
+		if port <= 0 {
+			port = emailDefaultPort
+		}
+		poll := result.Email.PollIntervalMinutes
+		if poll < emailMinInterval || poll > emailMaxInterval {
+			poll = emailDefaultInterval
+		}
+		result.Email.Accounts = []internalEmailAccount{{
+			ID:                  legacyEmailAccountID,
+			Host:                strings.TrimSpace(result.Email.Host),
+			Port:                port,
+			Username:            strings.TrimSpace(result.Email.Username),
+			PollIntervalMinutes: poll,
+			SyncLimit:           emailDefaultSyncLimit,
+			FolderID:            result.Email.FolderID,
+		}}
+		result.Email.Host = ""
+		result.Email.Port = 0
+		result.Email.Username = ""
+		result.Email.PollIntervalMinutes = 0
+		result.Email.FolderID = nil
+	}
+	for i := range result.Email.Accounts {
+		account := &result.Email.Accounts[i]
+		account.Host = strings.TrimSpace(account.Host)
+		account.Username = strings.TrimSpace(account.Username)
+		if account.Port <= 0 {
+			account.Port = emailDefaultPort
+		}
+		if account.PollIntervalMinutes < emailMinInterval || account.PollIntervalMinutes > emailMaxInterval {
+			account.PollIntervalMinutes = emailDefaultInterval
+		}
+		if account.SyncLimit <= 0 {
+			account.SyncLimit = emailDefaultSyncLimit
+		}
+	}
 	return result, nil
 }
 
@@ -217,21 +265,51 @@ func (a *App) apiSettings(ctx context.Context, sessionExpiresAt *string) (Settin
 	wechat := internal.Wechat
 	wechat.WereadConnected = a.wereadCookieConfigured(ctx)
 	wechat.WereadCanRenew = wechat.WereadConnected && a.wereadCookieHasRefreshToken(ctx)
+	emailAccounts := make([]EmailAccount, 0, len(internal.Email.Accounts))
+	for _, account := range internal.Email.Accounts {
+		password, err := a.emailAccountPassword(ctx, account.ID)
+		if err != nil {
+			return Settings{}, err
+		}
+		emailAccounts = append(emailAccounts, EmailAccount{
+			ID:                  account.ID,
+			Host:                account.Host,
+			Port:                account.Port,
+			Username:            account.Username,
+			PollIntervalMinutes: account.PollIntervalMinutes,
+			SyncLimit:           account.SyncLimit,
+			FolderID:            account.FolderID,
+			PasswordSet:         password != "",
+		})
+	}
+	blockRemoteImages := true
+	if internal.Email.BlockRemoteImages != nil {
+		blockRemoteImages = *internal.Email.BlockRemoteImages
+	}
+	email := EmailSettings{
+		Enabled:           internal.Email.Enabled,
+		BlockRemoteImages: blockRemoteImages,
+		TrustedSenders:    internal.Email.TrustedSenders,
+		Accounts:          emailAccounts,
+	}
 	return Settings{
 		Reader: internal.Reader,
 		AI: AISettings{
-			Enabled:      internal.AI.Enabled,
-			BaseURL:      internal.AI.BaseURL,
-			Model:        internal.AI.Model,
-			APIKeySet:    apiKeySet,
-			SummaryStyle: internal.AI.SummaryStyle,
-			TargetLang:   internal.AI.TargetLang,
-			DailyLimit:   internal.AI.DailyLimit,
-			UsedToday:    usage.Calls,
-			TokensMonth:  usage.TokensMonth,
-			Consent:      internal.AI.Consent,
+			Enabled:        internal.AI.Enabled,
+			BaseURL:        internal.AI.BaseURL,
+			Model:          internal.AI.Model,
+			APIKeySet:      apiKeySet,
+			SummaryStyle:   internal.AI.SummaryStyle,
+			TargetLang:     internal.AI.TargetLang,
+			DailyLimit:     internal.AI.DailyLimit,
+			UsedToday:      usage.Calls,
+			TokensMonth:    usage.TokensMonth,
+			Consent:        internal.AI.Consent,
+			Prompts:        internal.AI.Prompts,
+			PromptDefaults: defaultAIPromptSettings(),
 		},
 		Wechat: wechat,
+		Email:  email,
 		Backup: internal.Backup,
 		Feed:   FeedSettings{TokenMasked: maskToken(globalToken)},
 		Security: SecuritySettings{
@@ -254,6 +332,14 @@ type readerPatch struct {
 	RailWidth        *int         `json:"rail_width"`
 	ListWidth        *int         `json:"list_width"`
 	Views            *[]SavedView `json:"views"`
+	PinnedSources    *[]int64     `json:"pinned_sources"`
+}
+
+type aiPromptPatch struct {
+	SummaryBullets *string `json:"summary_bullets"`
+	SummaryOne     *string `json:"summary_one"`
+	DigestBatch    *string `json:"digest_batch"`
+	DigestMerge    *string `json:"digest_merge"`
 }
 
 type aiPatch struct {
@@ -265,10 +351,31 @@ type aiPatch struct {
 	TargetLang   *string         `json:"target_lang"`
 	DailyLimit   *int            `json:"daily_limit"`
 	Consent      *bool           `json:"consent"`
+	Prompts      *aiPromptPatch  `json:"prompts"`
 }
 
 type wechatPatch struct {
 	Enabled *bool `json:"enabled"`
+}
+
+type emailAccountPatch struct {
+	ID                  string  `json:"id"`
+	Host                *string `json:"host"`
+	Port                *int    `json:"port"`
+	Username            *string `json:"username"`
+	PollIntervalMinutes *int    `json:"poll_interval_minutes"`
+	SyncLimit           *int    `json:"sync_limit"`
+	FolderID            *int64  `json:"folder_id"`
+}
+
+type emailPatch struct {
+	Enabled           *bool                `json:"enabled"`
+	BlockRemoteImages *bool                `json:"block_remote_images"`
+	TrustedSenders    *[]string            `json:"trusted_senders"`
+	Accounts          *[]emailAccountPatch `json:"accounts"`
+	// 单独保存/清除某个账号的授权码，避免把授权码混进账号数组。
+	AccountID *string         `json:"account_id"`
+	Password  json.RawMessage `json:"password"`
 }
 
 type backupPatch struct {
@@ -280,6 +387,7 @@ type settingsPatch struct {
 	Reader *readerPatch `json:"reader"`
 	AI     *aiPatch     `json:"ai"`
 	Wechat *wechatPatch `json:"wechat"`
+	Email  *emailPatch  `json:"email"`
 	Backup *backupPatch `json:"backup"`
 	MCP    *mcpPatch    `json:"mcp"`
 }
@@ -391,6 +499,25 @@ func (a *App) updateSettings(ctx context.Context, body []byte, sessionExpiresAt 
 			}
 			internal.Reader.Views = clean
 		}
+		if patch.Reader.PinnedSources != nil {
+			pinned := *patch.Reader.PinnedSources
+			if len(pinned) > 200 {
+				return Settings{}, badRequest("invalid_settings", "置顶订阅源最多 200 个")
+			}
+			seen := make(map[int64]struct{}, len(pinned))
+			clean := make([]int64, 0, len(pinned))
+			for _, id := range pinned {
+				if id <= 0 {
+					return Settings{}, badRequest("invalid_settings", "置顶订阅源 ID 无效")
+				}
+				if _, exists := seen[id]; exists {
+					continue
+				}
+				seen[id] = struct{}{}
+				clean = append(clean, id)
+			}
+			internal.Reader.PinnedSources = clean
+		}
 	}
 	var encryptedKey string
 	if patch.AI != nil {
@@ -450,6 +577,28 @@ func (a *App) updateSettings(ctx context.Context, body []byte, sessionExpiresAt 
 			}
 			internal.AI.TargetLang = lang
 		}
+		if patch.AI.Prompts != nil {
+			fields := []struct {
+				value  *string
+				target *string
+				name   string
+			}{
+				{patch.AI.Prompts.SummaryBullets, &internal.AI.Prompts.SummaryBullets, "要点列表提示词"},
+				{patch.AI.Prompts.SummaryOne, &internal.AI.Prompts.SummaryOne, "一句话提示词"},
+				{patch.AI.Prompts.DigestBatch, &internal.AI.Prompts.DigestBatch, "报告分批提示词"},
+				{patch.AI.Prompts.DigestMerge, &internal.AI.Prompts.DigestMerge, "报告简报提示词"},
+			}
+			for _, field := range fields {
+				if field.value == nil {
+					continue
+				}
+				normalized, apiErr := normalizeAIPrompt(*field.value)
+				if apiErr != nil {
+					return Settings{}, badRequest("invalid_settings", field.name+"不能超过 4000 个字符")
+				}
+				*field.target = normalized
+			}
+		}
 		if patch.AI.DailyLimit != nil {
 			if *patch.AI.DailyLimit < 1 || *patch.AI.DailyLimit > 10000 {
 				return Settings{}, badRequest("invalid_settings", "每日 AI 调用上限需在 1–10000 之间")
@@ -463,6 +612,162 @@ func (a *App) updateSettings(ctx context.Context, body []byte, sessionExpiresAt 
 	if patch.Wechat != nil {
 		if patch.Wechat.Enabled != nil {
 			internal.Wechat.Enabled = *patch.Wechat.Enabled
+		}
+	}
+	emailPasswordWrites := make(map[string]string)
+	var emailPasswordDeletes []string
+	if patch.Email != nil {
+		emailPatch := patch.Email
+		if emailPatch.Enabled != nil {
+			internal.Email.Enabled = *emailPatch.Enabled
+		}
+		if emailPatch.BlockRemoteImages != nil {
+			value := *emailPatch.BlockRemoteImages
+			internal.Email.BlockRemoteImages = &value
+		}
+		if emailPatch.TrustedSenders != nil {
+			senders := normalizeTrustedEmailSenders(*emailPatch.TrustedSenders)
+			if len(senders) > 200 {
+				return Settings{}, badRequest("invalid_settings", "放行发件人最多 200 个")
+			}
+			internal.Email.TrustedSenders = senders
+		}
+		if emailPatch.Accounts != nil {
+			accounts := *emailPatch.Accounts
+			if len(accounts) > 10 {
+				return Settings{}, badRequest("invalid_settings", "邮箱账号最多 10 个")
+			}
+			existing := make(map[string]internalEmailAccount, len(internal.Email.Accounts))
+			for _, account := range internal.Email.Accounts {
+				existing[account.ID] = account
+			}
+			seenIDs := make(map[string]struct{}, len(accounts))
+			seenUsers := make(map[string]struct{}, len(accounts))
+			clean := make([]internalEmailAccount, 0, len(accounts))
+			for _, input := range accounts {
+				id := strings.TrimSpace(input.ID)
+				if id == "" {
+					generated, err := newEmailAccountID()
+					if err != nil {
+						return Settings{}, internalError(err)
+					}
+					id = generated
+				}
+				if !emailAccountIDPattern.MatchString(id) {
+					return Settings{}, badRequest("invalid_settings", "邮箱账号 ID 无效")
+				}
+				if _, exists := seenIDs[id]; exists {
+					return Settings{}, badRequest("invalid_settings", "邮箱账号 ID 重复")
+				}
+				seenIDs[id] = struct{}{}
+				account, exists := existing[id]
+				if !exists {
+					account = internalEmailAccount{ID: id, Port: emailDefaultPort, PollIntervalMinutes: emailDefaultInterval, SyncLimit: emailDefaultSyncLimit}
+				}
+				account.ID = id
+				if input.Host != nil {
+					account.Host = strings.TrimSpace(*input.Host)
+				}
+				if input.Port != nil {
+					if *input.Port < 1 || *input.Port > 65535 {
+						return Settings{}, badRequest("invalid_settings", "端口需在 1–65535 之间")
+					}
+					account.Port = *input.Port
+				}
+				if input.Username != nil {
+					account.Username = strings.TrimSpace(*input.Username)
+				}
+				if input.PollIntervalMinutes != nil {
+					if *input.PollIntervalMinutes < emailMinInterval || *input.PollIntervalMinutes > emailMaxInterval {
+						return Settings{}, badRequest("invalid_settings", fmt.Sprintf("轮询间隔需在 %d–%d 分钟之间", emailMinInterval, emailMaxInterval))
+					}
+					account.PollIntervalMinutes = *input.PollIntervalMinutes
+				}
+				if input.SyncLimit != nil {
+					if *input.SyncLimit < emailMinSyncLimit || *input.SyncLimit > emailMaxSyncLimit {
+						return Settings{}, badRequest("invalid_settings", fmt.Sprintf("同步数量需在 %d–%d 封之间", emailMinSyncLimit, emailMaxSyncLimit))
+					}
+					account.SyncLimit = *input.SyncLimit
+				}
+				// accounts 是整体替换：folder_id 缺省/null 都表示不分组。
+				account.FolderID = nil
+				if input.FolderID != nil && *input.FolderID > 0 {
+					if err := a.ensureFolderExists(ctx, *input.FolderID); err != nil {
+						return Settings{}, err
+					}
+					folderID := *input.FolderID
+					account.FolderID = &folderID
+				} else if input.FolderID != nil && *input.FolderID < 0 {
+					return Settings{}, badRequest("invalid_settings", "分组 ID 无效")
+				}
+				if account.Username != "" {
+					key := strings.ToLower(account.Username)
+					if _, duplicate := seenUsers[key]; duplicate {
+						return Settings{}, badRequest("invalid_settings", "邮箱账号重复")
+					}
+					seenUsers[key] = struct{}{}
+				}
+				if account.Port <= 0 {
+					account.Port = emailDefaultPort
+				}
+				if account.PollIntervalMinutes < emailMinInterval || account.PollIntervalMinutes > emailMaxInterval {
+					account.PollIntervalMinutes = emailDefaultInterval
+				}
+				if account.SyncLimit == 0 {
+					account.SyncLimit = emailDefaultSyncLimit
+				}
+				clean = append(clean, account)
+			}
+			for id := range existing {
+				if _, kept := seenIDs[id]; !kept {
+					emailPasswordDeletes = append(emailPasswordDeletes, id)
+				}
+			}
+			internal.Email.Accounts = clean
+		}
+		if len(emailPatch.Password) > 0 {
+			target := ""
+			if emailPatch.AccountID != nil {
+				target = strings.TrimSpace(*emailPatch.AccountID)
+			}
+			if target == "" && len(internal.Email.Accounts) == 1 {
+				target = internal.Email.Accounts[0].ID
+			}
+			if target == "" {
+				return Settings{}, badRequest("invalid_settings", "请指定要保存授权码的邮箱账号")
+			}
+			if !emailAccountIDPattern.MatchString(target) {
+				return Settings{}, badRequest("invalid_settings", "邮箱账号 ID 无效")
+			}
+			found := false
+			for _, account := range internal.Email.Accounts {
+				if account.ID == target {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return Settings{}, badRequest("invalid_settings", "邮箱账号不存在")
+			}
+			if string(emailPatch.Password) == "null" {
+				emailPasswordDeletes = append(emailPasswordDeletes, target)
+			} else {
+				var password string
+				if err := json.Unmarshal(emailPatch.Password, &password); err != nil {
+					return Settings{}, badRequest("invalid_settings", "授权码必须是字符串")
+				}
+				password = strings.TrimSpace(password)
+				if password != "" {
+					if len(password) > 1024 {
+						return Settings{}, badRequest("invalid_settings", "授权码过长")
+					}
+					encrypted, err := a.secret.Encrypt(password)
+					if err != nil {
+						return Settings{}, internalError(err)
+					}
+					emailPasswordWrites[target] = encrypted
+				}
+			}
 		}
 	}
 	if patch.Backup != nil {
@@ -484,6 +789,25 @@ func (a *App) updateSettings(ctx context.Context, body []byte, sessionExpiresAt 
 	}
 	if encryptedKey != "" {
 		if err := a.writeSetting(ctx, settingAIKey, encryptedKey); err != nil {
+			return Settings{}, internalError(err)
+		}
+	}
+	for accountID, encrypted := range emailPasswordWrites {
+		if err := a.writeSetting(ctx, emailPasswordSettingKey(accountID), encrypted); err != nil {
+			return Settings{}, internalError(err)
+		}
+	}
+	for _, accountID := range emailPasswordDeletes {
+		if err := a.deleteSetting(ctx, emailPasswordSettingKey(accountID)); err != nil {
+			return Settings{}, internalError(err)
+		}
+		if accountID == legacyEmailAccountID {
+			_ = a.deleteSetting(ctx, settingEmailPassword)
+		}
+	}
+	if patch.Email != nil {
+		// 邮箱配置变化后同步源的轮询间隔 / 新建收集箱 / 重排下次抓取时间。
+		if err := a.ensureEmailSources(ctx); err != nil {
 			return Settings{}, internalError(err)
 		}
 	}

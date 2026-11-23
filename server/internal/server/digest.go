@@ -1079,15 +1079,9 @@ func (a *App) generateDigestBody(ctx context.Context, ruleName string, items []d
 		merged = nextLevel
 	}
 
-	mergePrompt := fmt.Sprintf(
-		"你是订阅助手。请把「%s」（%s ~ %s）的 %d 篇文章小结整理成一份极简中文简报。\n"+
-			"要求：\n"+
-			"1. 开头用 2-3 句总述本期重点，不超过 150 字；\n"+
-			"2. 按 3-6 个主题分节，每节 1-3 条短要点，每条不超过 50 字；\n"+
-			"3. 合并重复或相似内容，不要把每篇文章逐条列出；\n"+
-			"4. 不输出文章清单、链接、来源和时间；\n"+
-			"5. 只使用给定小结，不编造；全文控制在 900-1400 字。\n\n%s",
+	mergePrompt := buildDigestMergePrompt(
 		ruleName, startLabel, endLabel, len(items),
+		runtime.settings.AI.Prompts.DigestMergeInstruction(),
 		strings.Join(merged, "\n\n"))
 	status := "ok"
 	body, _, ok := a.digestChat(ctx, runtime, mergePrompt, 1800)
@@ -1128,9 +1122,7 @@ func (a *App) digestBatchSummary(ctx context.Context, runtime *aiRuntime, items 
 		fmt.Fprintf(&b, "%d. 「%s」（来源：%s）\n   正文节选：%s\n\n",
 			i+1, item.Title, item.Source, truncateDigestRunes(item.Excerpt, digestExcerptRunes))
 	}
-	prompt := "以下是若干篇订阅文章的标题与正文节选。请为每一条写一句中文要点，" +
-		"严格控制在 40 个汉字以内；合并同一事件的不同说法；" +
-		"只输出「- 编号. 要点」列表，不要标题、来源、链接或额外评论：\n\n" + b.String()
+	prompt := buildDigestBatchPrompt(runtime.settings.AI.Prompts.DigestBatchInstruction(), b.String())
 	if text, _, ok := a.digestChat(ctx, runtime, prompt, 1600); ok {
 		return text, true
 	}

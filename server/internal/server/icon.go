@@ -19,6 +19,9 @@ import (
 	"github.com/PuerkitoBio/goquery"
 )
 
+// xUnavatarBase 是 X 头像第三方降级候选（unavatar.io 聚合服务）；测试可覆盖。
+var xUnavatarBase = "https://unavatar.io/x/"
+
 const (
 	iconCacheTTL      = 7 * 24 * time.Hour
 	iconFailureTTL    = time.Hour
@@ -119,7 +122,9 @@ func (a *App) serveIcon(w http.ResponseWriter, r *http.Request, id int64, requir
 		return false
 	}
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "public, max-age=604800")
+	// 图标会在后台刷新（如 X 头像降级候选）；no-cache 让浏览器每次回源验证，
+	// 避免旧的通用图标在 7 天缓存里压住新头像。
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, "", info.ModTime(), file)
 	return true
@@ -150,11 +155,24 @@ func supportedIconContentType(contentType string) bool {
 	return strings.HasPrefix(contentType, "image/")
 }
 
-func (a *App) refreshSourceIcon(ctx context.Context, id int64, row iconSourceRow) error {
-	if a.iconFailureRecent(id) {
-		return errors.New("icon recently failed")
+// iconCandidates builds the ordered icon sources for a source row.
+// X sources (BUG-004/BUG-007) must ONLY try real avatar candidates: the site
+// favicon chain would cache fxtwitter.com's Twitter-blue-bird favicon.
+// unavatar 优先于 Feed 的 <image>：FxTwitter 的频道图会停留在旧头像
+// （例如 @poteto 仍是 2026-10 的照片），而 unavatar 按 handle 返回当前头像。
+// Feed 图只作降级，避免第三方服务异常时完全没有头像。
+func (a *App) iconCandidates(ctx context.Context, row iconSourceRow) []string {
+	candidates := make([]string, 0, 5)
+	if isXFeedURL(row.FeedURL) {
+		if handle := xHandleFromFeedURL(row.FeedURL); handle != "" {
+			// unavatar.io 聚合服务按 handle 返回当前头像（实测与 pbs 当前原图字节一致）。
+			candidates = append(candidates, xUnavatarBase+handle)
+		}
+		if row.IconSourceURL != "" {
+			candidates = append(candidates, row.IconSourceURL)
+		}
+		return candidates
 	}
-	candidates := make([]string, 0, 4)
 	if row.IconSourceURL != "" {
 		candidates = append(candidates, row.IconSourceURL)
 	}
@@ -169,6 +187,63 @@ func (a *App) refreshSourceIcon(ctx context.Context, id int64, row iconSourceRow
 	if origin := faviconOrigin(row.FeedURL); origin != "" {
 		candidates = append(candidates, origin)
 	}
+	return candidates
+}
+
+// isXFeedURL reports whether the feed comes from the FxTwitter/FxEmbed family.
+// Sources may carry kind=rss (pasted feed URL), so the check is host-based.
+func isXFeedURL(feedURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(feedURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	return host == "fxtwitter.com" || host == "api.fxtwitter.com" || host == "fixupx.com"
+}
+
+// clearSourceIcon removes the cached icon and failure marker for one source so
+// the next icon request re-runs the candidate chain. Called on manual refresh:
+// users expect "refresh" to refresh the avatar too, not only the content.
+func (a *App) clearSourceIcon(id int64) {
+	if path := a.iconPath(id); pathWithin(a.cfg.CacheDir, path) {
+		_ = os.Remove(path)
+	}
+	a.clearIconFailure(id)
+}
+
+// resetLegacyXSourceIcons removes cached icons for X sources. Earlier builds
+// could cache fxtwitter.com's blue-bird favicon as the source icon; that file
+// would otherwise be served for the 7-day TTL and users would keep seeing the
+// old bird even after the candidate chain changed. Called once on startup.
+func (a *App) resetLegacyXSourceIcons(ctx context.Context) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT id FROM sources
+		WHERE lower(feed_url) LIKE '%fxtwitter.com/%' OR lower(feed_url) LIKE '%fixupx.com/%'`)
+	if err != nil {
+		return
+	}
+	ids := make([]int64, 0, 32)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	_ = rows.Close()
+	for _, id := range ids {
+		a.clearSourceIcon(id)
+	}
+	if len(ids) > 0 {
+		a.logger.Info("reset legacy x source icons", "count", len(ids))
+	}
+}
+
+func (a *App) refreshSourceIcon(ctx context.Context, id int64, row iconSourceRow) error {
+	if a.iconFailureRecent(id) {
+		return errors.New("icon recently failed")
+	}
+	candidates := a.iconCandidates(ctx, row)
+	failures := make([]string, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
 	for _, candidate := range candidates {
 		candidate = strings.TrimSpace(candidate)
@@ -179,8 +254,12 @@ func (a *App) refreshSourceIcon(ctx context.Context, id int64, row iconSourceRow
 			continue
 		}
 		seen[candidate] = struct{}{}
-		data, contentType, err := a.fetchIcon(ctx, candidate)
+		// 单个候选限时 6s：被墙/挂起的候选不能拖死整条链（浏览器正在等响应）。
+		candidateCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		data, contentType, err := a.fetchIcon(candidateCtx, candidate)
+		cancel()
 		if err != nil {
+			failures = append(failures, sourceHostLabel(candidate)+": "+err.Error())
 			continue
 		}
 		if err := a.writeIconCache(id, data); err != nil {
@@ -192,6 +271,9 @@ func (a *App) refreshSourceIcon(ctx context.Context, id int64, row iconSourceRow
 	}
 	_ = os.MkdirAll(a.iconDir(), 0o750)
 	_ = os.WriteFile(a.iconFailurePath(id), []byte(a.now().Format(timeRFC3339)), 0o640)
+	if len(failures) > 0 {
+		a.logger.Warn("source icon refresh failed", "source_id", id, "candidates", strings.Join(failures, " | "))
+	}
 	return errors.New("no icon found")
 }
 
@@ -359,6 +441,21 @@ func (a *App) enforceIconQuota() error {
 		}
 	}
 	return nil
+}
+
+// invalidateOldIcon removes a cached icon older than maxAge so the next
+// request re-runs the candidate chain. Used for X avatars whose candidate
+// chain changed and whose cache may hold a stale generic site icon.
+func (a *App) invalidateOldIcon(id int64, maxAge time.Duration) {
+	path := a.iconPath(id)
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return
+	}
+	if time.Since(info.ModTime()) < maxAge {
+		return
+	}
+	a.clearSourceIcon(id)
 }
 
 func (a *App) clearIconFailure(id int64) {

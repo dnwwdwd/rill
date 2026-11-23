@@ -292,7 +292,7 @@ func TestWechatSourceFetchesViaWeread(t *testing.T) {
 			_, _ = w.Write([]byte(`{"errCode":0,"reviews":[{"createTime":1700000000,"subReviews":[{"review":{"reviewId":"MP_WXS_3517031589_test","createTime":1700000000,"mpInfo":{"title":"二哥狗腿子测试文章","originalId":""}}}]}]}`))
 		case r.URL.Path == "/web/mp/content":
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			_, _ = w.Write([]byte(`<!doctype html><meta property="og:url" content="https://mp.weixin.qq.com/s/test"><div id="js_content"><p>微信读书正文</p></div>`))
+			_, _ = w.Write([]byte(`<!doctype html><meta property="og:url" content="https://mp.weixin.qq.com/s/test"><div id="js_content"><p>微信读书正文</p><img data-src="https://mmbiz.qpic.cn/sz_mmbiz_jpg/example/640?wx_fmt=jpeg" src="data:image/gif;base64,AAAA"></div>`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -339,6 +339,31 @@ func TestWechatSourceFetchesViaWeread(t *testing.T) {
 	}
 	if updated.LastStatus == nil || *updated.LastStatus != "ok" || updated.ItemCount != 1 {
 		t.Fatalf("updated source: %+v", updated)
+	}
+
+	var contentHTML, mediaJSON string
+	if err := app.db.QueryRowContext(context.Background(), `
+		SELECT content_html, COALESCE(media_json, '') FROM items WHERE source_id = ?`,
+		source.ID).Scan(&contentHTML, &mediaJSON); err != nil {
+		t.Fatalf("read stored item: %v", err)
+	}
+	if !strings.Contains(contentHTML, "/media/") || strings.Contains(contentHTML, ` src="https://mmbiz.qpic.cn`) {
+		t.Fatalf("wechat image was not rewritten to the media proxy: %s", contentHTML)
+	}
+	if !strings.Contains(contentHTML, `referrerpolicy="no-referrer"`) {
+		t.Fatalf("wechat image missing no-referrer: %s", contentHTML)
+	}
+	if !strings.Contains(mediaJSON, "https://mmbiz.qpic.cn/sz_mmbiz_jpg/example/640?wx_fmt=jpeg") {
+		t.Fatalf("media_json missing original image: %s", mediaJSON)
+	}
+	var registered int
+	if err := app.db.QueryRowContext(context.Background(), `
+		SELECT COUNT(*) FROM media_cache WHERE source_url = ?`,
+		"https://mmbiz.qpic.cn/sz_mmbiz_jpg/example/640?wx_fmt=jpeg").Scan(&registered); err != nil {
+		t.Fatalf("read media cache: %v", err)
+	}
+	if registered != 1 {
+		t.Fatalf("media cache rows = %d, want 1", registered)
 	}
 }
 

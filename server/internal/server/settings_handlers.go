@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"rill/internal/version"
 )
 
 func (a *App) handleGetSettings(w http.ResponseWriter, r *http.Request) error {
@@ -61,6 +63,7 @@ func (a *App) handleDetailedHealth(w http.ResponseWriter, r *http.Request) error
 	a.schedMu.RUnlock()
 	payload := map[string]any{
 		"ok":                     dbWritable,
+		"version":                version.Version,
 		"db_writable":            dbWritable,
 		"migration_version":      migrationVersion,
 		"due_count":              dueCount,

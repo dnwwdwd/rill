@@ -255,6 +255,26 @@ func parseXiaoyuzhouPage(body []byte) (xyzNextData, error) {
 	return data, nil
 }
 
+// isXiaoyuzhouFeedURL reports whether the source fetches the Xiaoyuzhou
+// official distribution feed (feed.xyzfm.space). Since 2026-11 that host
+// enforces an upstream IP whitelist and denies non-whitelisted exits.
+func isXiaoyuzhouFeedURL(feedURL string) bool {
+	return strings.Contains(strings.ToLower(feedURL), "feed.xyzfm.space/")
+}
+
+// xiaoyuzhouPidFromSiteURL recovers the podcast id from a stored site URL
+// (www.xiaoyuzhoufm.com/podcast/{pid}) so a denied distribution feed can
+// degrade to the page fetcher.
+func xiaoyuzhouPidFromSiteURL(siteURL *string) string {
+	if siteURL == nil {
+		return ""
+	}
+	if pid, _, _, ok := xiaoyuzhouRefFromInput(*siteURL); ok && pid != "" {
+		return pid
+	}
+	return ""
+}
+
 func (a *App) fetchXiaoyuzhou(ctx context.Context, source dbSource) (*fetch.FeedResult, error) {
 	pid := strings.TrimSpace(strings.TrimPrefix(source.FeedURL, "xiaoyuzhou://podcast/"))
 	if pid == "" {

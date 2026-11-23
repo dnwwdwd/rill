@@ -158,7 +158,7 @@ func TestEnrichFullTextTracksImages(t *testing.T) {
 		t.Fatalf("full-text media URL not tracked: %+v", items[0].MediaURLs)
 	}
 	if _, _, err := client.app.applyFeedResult(context.Background(), source,
-		&fetch.FeedResult{Items: items, HTTPStatus: http.StatusOK}, time.Now(), 0, ""); err != nil {
+		&fetch.FeedResult{Items: items, HTTPStatus: http.StatusOK}, time.Now(), 0, "", false); err != nil {
 		t.Fatal(err)
 	}
 	var mediaJSON string
@@ -201,7 +201,7 @@ func TestApplyFeedResultUpdatesChangedItemURL(t *testing.T) {
 		t.Helper()
 		if _, _, err := client.app.applyFeedResult(context.Background(), source,
 			&fetch.FeedResult{Items: []fetch.FeedItem{item}, HTTPStatus: http.StatusOK},
-			time.Now(), 0, ""); err != nil {
+			time.Now(), 0, "", false); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -45,6 +45,10 @@ type Source struct {
 	Note              *string `json:"note,omitempty"`
 	BackfillMode      string  `json:"backfill_mode"`
 	FullText          bool    `json:"full_text"`
+	WatchEnabled      bool    `json:"watch_enabled"`
+	WatchMode         string  `json:"watch_mode"`
+	WatchAI           bool    `json:"watch_ai"`
+	WatchChannelIDs   []int64 `json:"watch_channel_ids"`
 }
 
 type FetchLog struct {
@@ -118,6 +122,9 @@ type Translation struct {
 type ItemDetail struct {
 	ItemSummary
 	OriginalTitle          *string      `json:"original_title,omitempty"`
+	SourceFeedURL          string       `json:"source_feed_url,omitempty"`
+	SenderEmail            string       `json:"sender_email,omitempty"`
+	EmailImagesAllowed     bool         `json:"email_images_allowed,omitempty"`
 	ContentHTML            string       `json:"content_html"`
 	ContentText            string       `json:"content_text"`
 	AudioURL               string       `json:"audio_url,omitempty"`
@@ -230,6 +237,7 @@ type ReaderSettings struct {
 	RailWidth        int         `json:"rail_width"`
 	ListWidth        int         `json:"list_width"`
 	Views            []SavedView `json:"views"`
+	PinnedSources    []int64     `json:"pinned_sources"`
 }
 
 type SavedView struct {
@@ -242,17 +250,28 @@ type SavedView struct {
 	ReadFilter string `json:"read_filter,omitempty"`
 }
 
+// AIPromptSettings 是用户可编辑的任务指令。空字符串表示使用系统默认；
+// system 角色、任务声明、不可信内容边界仍由服务端固定（REQ-042）。
+type AIPromptSettings struct {
+	SummaryBullets string `json:"summary_bullets"`
+	SummaryOne     string `json:"summary_one"`
+	DigestBatch    string `json:"digest_batch"`
+	DigestMerge    string `json:"digest_merge"`
+}
+
 type AISettings struct {
-	Enabled      bool   `json:"enabled"`
-	BaseURL      string `json:"base_url"`
-	Model        string `json:"model"`
-	APIKeySet    bool   `json:"api_key_set"`
-	SummaryStyle string `json:"summary_style"`
-	TargetLang   string `json:"target_lang"`
-	DailyLimit   int    `json:"daily_limit"`
-	UsedToday    int    `json:"used_today"`
-	TokensMonth  int64  `json:"tokens_month"`
-	Consent      bool   `json:"consent"`
+	Enabled        bool             `json:"enabled"`
+	BaseURL        string           `json:"base_url"`
+	Model          string           `json:"model"`
+	APIKeySet      bool             `json:"api_key_set"`
+	SummaryStyle   string           `json:"summary_style"`
+	TargetLang     string           `json:"target_lang"`
+	DailyLimit     int              `json:"daily_limit"`
+	UsedToday      int              `json:"used_today"`
+	TokensMonth    int64            `json:"tokens_month"`
+	Consent        bool             `json:"consent"`
+	Prompts        AIPromptSettings `json:"prompts"`
+	PromptDefaults AIPromptSettings `json:"prompt_defaults"`
 }
 
 type WechatSettings struct {
@@ -262,6 +281,27 @@ type WechatSettings struct {
 	// WereadCanRenew 表示落库 Cookie 是否带 wr_rt 刷新令牌。旧版扫码的 Cookie
 	// 没有它，运行期无法自动续期，只能重新扫码一次；UI 必须把这种情况说清楚。
 	WereadCanRenew bool `json:"weread_can_renew"`
+}
+
+// EmailAccount 是单个 IMAP 邮箱的对外视图；授权码永不回传，只给 PasswordSet。
+type EmailAccount struct {
+	ID                  string `json:"id"`
+	Host                string `json:"host"`
+	Port                int    `json:"port"`
+	Username            string `json:"username"`
+	PollIntervalMinutes int    `json:"poll_interval_minutes"`
+	SyncLimit           int    `json:"sync_limit"`
+	FolderID            *int64 `json:"folder_id"`
+	PasswordSet         bool   `json:"password_set"`
+}
+
+// EmailSettings 是「邮箱同步」的对外视图。多个邮箱各自对应一个订阅源；
+// 远程图片默认拦截，TrustedSenders 中的发件人可长期放行。
+type EmailSettings struct {
+	Enabled           bool           `json:"enabled"`
+	BlockRemoteImages bool           `json:"block_remote_images"`
+	TrustedSenders    []string       `json:"trusted_senders"`
+	Accounts          []EmailAccount `json:"accounts"`
 }
 
 type BackupSettings struct {
@@ -305,6 +345,7 @@ type Settings struct {
 	Reader   ReaderSettings   `json:"reader"`
 	AI       AISettings       `json:"ai"`
 	Wechat   WechatSettings   `json:"wechat"`
+	Email    EmailSettings    `json:"email"`
 	Backup   BackupSettings   `json:"backup"`
 	Feed     FeedSettings     `json:"feed"`
 	Security SecuritySettings `json:"security"`
@@ -314,21 +355,50 @@ type Settings struct {
 // internalAISettings is persisted as JSON; the API key is stored separately
 // so it can never be returned by a generic settings marshal.
 type internalAISettings struct {
-	Enabled      bool   `json:"enabled"`
-	BaseURL      string `json:"base_url"`
-	Model        string `json:"model"`
-	SummaryStyle string `json:"summary_style"`
-	TargetLang   string `json:"target_lang"`
-	DailyLimit   int    `json:"daily_limit"`
-	Consent      bool   `json:"consent"`
+	Enabled      bool             `json:"enabled"`
+	BaseURL      string           `json:"base_url"`
+	Model        string           `json:"model"`
+	SummaryStyle string           `json:"summary_style"`
+	TargetLang   string           `json:"target_lang"`
+	DailyLimit   int              `json:"daily_limit"`
+	Consent      bool             `json:"consent"`
+	Prompts      AIPromptSettings `json:"prompts"`
 }
 
 type internalSettings struct {
-	Reader ReaderSettings      `json:"reader"`
-	AI     internalAISettings  `json:"ai"`
-	Wechat WechatSettings      `json:"wechat"`
-	Backup BackupSettings      `json:"backup"`
-	MCP    internalMCPSettings `json:"mcp"`
+	Reader ReaderSettings        `json:"reader"`
+	AI     internalAISettings    `json:"ai"`
+	Wechat WechatSettings        `json:"wechat"`
+	Email  internalEmailSettings `json:"email"`
+	Backup BackupSettings        `json:"backup"`
+	MCP    internalMCPSettings   `json:"mcp"`
+}
+
+// internalEmailSettings 持久化为 app_settings JSON 的 email 节；授权码按账号
+// 分别加密存 `email_password_enc:{id}`，与 ai_api_key_enc 模式一致，避免随
+// 通用设置序列化泄漏。旧版单账号字段保留只用于读取迁移。
+type internalEmailAccount struct {
+	ID                  string `json:"id"`
+	Host                string `json:"host"`
+	Port                int    `json:"port"`
+	Username            string `json:"username"`
+	PollIntervalMinutes int    `json:"poll_interval_minutes"`
+	SyncLimit           int    `json:"sync_limit"`
+	FolderID            *int64 `json:"folder_id"`
+}
+
+type internalEmailSettings struct {
+	Enabled           bool                   `json:"enabled"`
+	BlockRemoteImages *bool                  `json:"block_remote_images,omitempty"`
+	TrustedSenders    []string               `json:"trusted_senders,omitempty"`
+	Accounts          []internalEmailAccount `json:"accounts,omitempty"`
+
+	// Legacy single-account fields（REQ-041 初版），读取后迁移到 Accounts。
+	Host                string `json:"host,omitempty"`
+	Port                int    `json:"port,omitempty"`
+	Username            string `json:"username,omitempty"`
+	PollIntervalMinutes int    `json:"poll_interval_minutes,omitempty"`
+	FolderID            *int64 `json:"folder_id,omitempty"`
 }
 
 type internalMCPSettings struct {
@@ -355,6 +425,7 @@ func defaultInternalSettings() internalSettings {
 			RailWidth:        224,
 			ListWidth:        384,
 			Views:            []SavedView{},
+			PinnedSources:    []int64{},
 		},
 		AI: internalAISettings{
 			Enabled:      false,
@@ -366,6 +437,9 @@ func defaultInternalSettings() internalSettings {
 			Consent:      false,
 		},
 		Wechat: WechatSettings{Enabled: false},
+		Email: internalEmailSettings{
+			Enabled: false,
+		},
 		Backup: BackupSettings{Daily: true, Keep: 7},
 	}
 }

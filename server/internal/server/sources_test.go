@@ -1,7 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -101,6 +103,86 @@ func TestSourceValidationAndDuplicate(t *testing.T) {
 	}, true)
 	if response.StatusCode != http.StatusBadRequest || errorCode(t, data) != "url_blocked" {
 		t.Fatalf("bad scheme: %d %s", response.StatusCode, data)
+	}
+}
+
+func TestUpdateSourceFeedURLRefreshesMetadataAndFetches(t *testing.T) {
+	_, client := newTestAppWithInitialFetch(t, true)
+	client.login()
+
+	writeFeed := func(title, itemTitle, guid string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/rss+xml; charset=utf-8")
+			fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<title>%s</title><link>http://%s/site</link><description>test</description>
+<item><guid>%s</guid><title>%s</title><link>http://%s/post</link></item>
+</channel></rss>`, title, r.Host, guid, itemTitle, r.Host)
+		}
+	}
+	oldServer := httptest.NewServer(writeFeed("Old Feed", "Old item", "old-1"))
+	t.Cleanup(oldServer.Close)
+	newServer := httptest.NewServer(writeFeed("Updated Feed", "Fresh item", "new-1"))
+	t.Cleanup(newServer.Close)
+
+	source := createTestSource(t, client, "Custom name", oldServer.URL+"/feed.xml")
+	var updated Source
+	client.decode(http.MethodPatch, "/api/v1/sources/"+itoa(source.ID), map[string]any{
+		"feed_url": newServer.URL + "/feed.xml",
+	}, true, http.StatusOK, &updated)
+	if updated.FeedURL != newServer.URL+"/feed.xml" {
+		t.Fatalf("feed_url = %q", updated.FeedURL)
+	}
+	if updated.Name != "Updated Feed" {
+		t.Fatalf("name = %q, want feed title", updated.Name)
+	}
+	if updated.SiteURL == nil || *updated.SiteURL != newServer.URL+"/site" {
+		t.Fatalf("site_url = %v, want new feed link", updated.SiteURL)
+	}
+	if updated.LastStatus == nil || *updated.LastStatus != "ok" {
+		t.Fatalf("fetch status = %v, want ok", updated.LastStatus)
+	}
+
+	var page ItemPage
+	client.decode(http.MethodGet, "/api/v1/items?source_id="+itoa(source.ID), nil, false, http.StatusOK, &page)
+	found := false
+	for _, item := range page.Items {
+		if item.Title == "Fresh item" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("new feed item not fetched: %+v", page.Items)
+	}
+}
+
+func TestUpdateSourceFeedURLValidation(t *testing.T) {
+	_, client := newTestApp(t, true)
+	client.login()
+
+	first := createTestSource(t, client, "First", "https://example.com/one.xml")
+	second := createTestSource(t, client, "Second", "https://example.com/two.xml")
+
+	response, data := client.request(http.MethodPatch, "/api/v1/sources/"+itoa(second.ID), map[string]any{
+		"feed_url": first.FeedURL,
+	}, true)
+	if response.StatusCode != http.StatusConflict || errorCode(t, data) != "source_exists" {
+		t.Fatalf("duplicate URL: %d %s", response.StatusCode, data)
+	}
+
+	response, data = client.request(http.MethodPatch, "/api/v1/sources/"+itoa(second.ID), map[string]any{
+		"feed_url": "ftp://example.com/two.xml",
+	}, true)
+	if response.StatusCode != http.StatusBadRequest || errorCode(t, data) != "invalid_url" {
+		t.Fatalf("invalid URL: %d %s", response.StatusCode, data)
+	}
+
+	email := createTestSource(t, client, "Mailbox", "imap://user@example.com")
+	response, data = client.request(http.MethodPatch, "/api/v1/sources/"+itoa(email.ID), map[string]any{
+		"feed_url": "https://example.com/three.xml",
+	}, true)
+	if response.StatusCode != http.StatusBadRequest || errorCode(t, data) != "invalid_source" {
+		t.Fatalf("email URL edit: %d %s", response.StatusCode, data)
 	}
 }
 

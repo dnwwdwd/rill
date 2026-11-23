@@ -16,7 +16,7 @@ const sourceSelectColumns = `
 	s.refresh_seconds, s.initial_limit, s.fallback_url, s.last_fetch_at,
 	s.last_new_item_at, s.next_fetch_at, s.last_status, s.last_error, s.fail_count,
 	(SELECT COUNT(*) FROM items i WHERE i.source_id = s.id),
-	(SELECT COUNT(*) FROM items i WHERE i.source_id = s.id AND i.read_at IS NULL),
+	(SELECT COUNT(*) FROM items i WHERE i.source_id = s.id AND i.read_at IS NULL AND i.hidden = 0),
 	s.retention_days, s.retention_max_items, s.icon_url, s.note, s.backfill_mode, s.config_json`
 
 type rowScanner interface {
@@ -72,11 +72,25 @@ func scanSource(scanner rowScanner) (dbSource, error) {
 	}
 	if strings.TrimSpace(result.ConfigJSON) != "" {
 		var config struct {
-			FullText bool `json:"full_text"`
+			FullText        bool    `json:"full_text"`
+			WatchEnabled    bool    `json:"watch_enabled"`
+			WatchMode       string  `json:"watch_mode"`
+			WatchAI         bool    `json:"watch_ai"`
+			WatchChannelIDs []int64 `json:"watch_channel_ids"`
 		}
 		if json.Unmarshal([]byte(result.ConfigJSON), &config) == nil {
 			result.FullText = config.FullText
+			result.WatchEnabled = config.WatchEnabled
+			result.WatchMode = config.WatchMode
+			result.WatchAI = config.WatchAI
+			result.WatchChannelIDs = config.WatchChannelIDs
 		}
+	}
+	if result.WatchMode != "each" && result.WatchMode != "batch" {
+		result.WatchMode = "batch"
+	}
+	if result.WatchChannelIDs == nil {
+		result.WatchChannelIDs = []int64{}
 	}
 	return result, nil
 }
@@ -319,10 +333,34 @@ func (a *App) createSourceRow(ctx context.Context, input sourceCreateInput) (Sou
 	if input.Note != nil && strings.TrimSpace(*input.Note) != "" {
 		note = strings.TrimSpace(*input.Note)
 	}
-	configJSON := "{}"
+	config := map[string]any{}
 	if input.FullText != nil && *input.FullText {
-		configJSON = `{"full_text":true}`
+		config["full_text"] = true
 	}
+	if input.WatchEnabled != nil {
+		config["watch_enabled"] = *input.WatchEnabled
+	}
+	if input.WatchMode != nil {
+		if *input.WatchMode != "each" && *input.WatchMode != "batch" {
+			return Source{}, badRequest("invalid_watch_mode", "关注提醒方式只能是 each 或 batch")
+		}
+		config["watch_mode"] = *input.WatchMode
+	}
+	if input.WatchAI != nil {
+		config["watch_ai"] = *input.WatchAI
+	}
+	if input.WatchChannelIDs != nil {
+		ids, apiErr := normalizeWatchChannelIDs(input.WatchChannelIDs)
+		if apiErr != nil {
+			return Source{}, apiErr
+		}
+		config["watch_channel_ids"] = ids
+	}
+	configData, err := json.Marshal(config)
+	if err != nil {
+		return Source{}, internalError(err)
+	}
+	configJSON := string(configData)
 	result, err := a.db.ExecContext(ctx, `
 		INSERT INTO sources (
 			kind, name, feed_url, site_url, folder_id, config_json, enabled, refresh_seconds,
@@ -363,6 +401,10 @@ type sourceCreateInput struct {
 	IconURL           *string `json:"icon_url"`
 	Note              *string `json:"note"`
 	FullText          *bool   `json:"full_text"`
+	WatchEnabled      *bool   `json:"watch_enabled"`
+	WatchMode         *string `json:"watch_mode"`
+	WatchAI           *bool   `json:"watch_ai"`
+	WatchChannelIDs   []int64 `json:"watch_channel_ids"`
 }
 
 // normalizeRSSHubURL turns rsshub:// share links into fetchable https URLs.
@@ -467,6 +509,14 @@ func nullStringPtr(value sql.NullString) *string {
 func (a *App) validateSourceURL(ctx context.Context, kind, raw string) error {
 	if kind == "wechat" {
 		return a.validateWechatFeedURL(ctx, raw)
+	}
+	// REQ-041：邮箱同步源的 feed_url 是 imap://{username}[/{sender}]，
+	// 不是 HTTP 目标，不走 fetcher 校验。
+	if strings.HasPrefix(raw, "imap://") {
+		if _, _, ok := parseEmailFeedURL(raw); !ok {
+			return badRequest("invalid_email_url", "邮箱同步源地址无效")
+		}
+		return nil
 	}
 	if strings.HasPrefix(raw, "xiaoyuzhou://podcast/") {
 		pid := strings.TrimSpace(strings.TrimPrefix(raw, "xiaoyuzhou://podcast/"))

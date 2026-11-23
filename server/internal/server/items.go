@@ -10,6 +10,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/PuerkitoBio/goquery"
+
+	"rill/internal/fetch"
 )
 
 type itemFilter struct {
@@ -345,18 +349,18 @@ func (a *App) handleGetItem(w http.ResponseWriter, r *http.Request) error {
 
 func (a *App) getItemDetail(ctx context.Context, id int64) (ItemDetail, error) {
 	var detail ItemDetail
-	var url, author, published, contentText, readAt, starredAt, laterAt, originalTitle, contentHTML, mediaRaw sql.NullString
+	var url, author, published, contentText, readAt, starredAt, laterAt, originalTitle, contentHTML, mediaRaw, feedURL, feedToken sql.NullString
 	var estimated int
 	err := a.db.QueryRowContext(ctx, `
 		SELECT i.id, i.source_id, s.name, s.kind, i.title, i.url, i.author,
 		       i.published_at, i.published_estimated, i.content_text,
 		       i.read_at, i.starred_at, i.later_at, i.fetched_at,
-		       i.content_html, i.original_title, COALESCE(i.media_json, '')
+		       i.content_html, i.original_title, COALESCE(i.media_json, ''), s.feed_url, s.feed_token
 		FROM items i JOIN sources s ON s.id = i.source_id
 		WHERE i.id = ?`, id).Scan(
 		&detail.ID, &detail.SourceID, &detail.Source.Name, &detail.Source.Kind,
 		&detail.Title, &url, &author, &published, &estimated, &contentText,
-		&readAt, &starredAt, &laterAt, &detail.FetchedAt, &contentHTML, &originalTitle, &mediaRaw,
+		&readAt, &starredAt, &laterAt, &detail.FetchedAt, &contentHTML, &originalTitle, &mediaRaw, &feedURL, &feedToken,
 	)
 	if err != nil {
 		return detail, err
@@ -370,11 +374,17 @@ func (a *App) getItemDetail(ctx context.Context, id int64) (ItemDetail, error) {
 	detail.StarredAt = nullStringPtr(starredAt)
 	detail.LaterAt = nullStringPtr(laterAt)
 	detail.Excerpt = makeExcerpt(contentText.String, 220)
-	detail.CoverURL = firstProxiedImage(contentHTML.String)
 	detail.ContentHTML = contentHTML.String
 	detail.ContentText = contentText.String
 	detail.OriginalTitle = nullStringPtr(originalTitle)
+	detail.SourceFeedURL = feedURL.String
 	media := decodeMediaPayload(mediaRaw.String)
+	detail.SenderEmail = media.EmailSender
+	detail.EmailImagesAllowed = media.EmailImagesAllowed
+	if strings.HasPrefix(feedURL.String, "imap://") {
+		detail.ContentHTML = decorateEmailImageAttrs(detail.ContentHTML, media.Images, feedToken.String)
+	}
+	detail.CoverURL = firstProxiedImage(detail.ContentHTML)
 	detail.AudioURL = media.AudioURL
 	detail.AudioType = media.AudioType
 	if err := a.db.QueryRowContext(ctx, `
@@ -394,6 +404,63 @@ func (a *App) getItemDetail(ctx context.Context, id int64) (ItemDetail, error) {
 	}
 	detail.Notes = notes
 	return detail, nil
+}
+
+// decorateEmailImageAttrs repairs the media token and backfills
+// data-remote-src for email items stored before the image allowlist existed.
+// Older syncs could store /media//{hash} because the mailbox source was loaded
+// without feed_token; those images 404'd and no allow button appeared.
+func decorateEmailImageAttrs(content string, media []string, token string) string {
+	if content == "" || token == "" {
+		return content
+	}
+	byHash := make(map[string]string, len(media))
+	for _, remote := range media {
+		byHash[fetch.URLHash(remote)] = remote
+	}
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(content))
+	if err != nil {
+		return content
+	}
+	prefix := "/media/" + token + "/"
+	changed := false
+	doc.Find("img[src]").Each(func(_ int, selection *goquery.Selection) {
+		src, _ := selection.Attr("src")
+		if !strings.HasPrefix(src, "/media/") {
+			return
+		}
+		rest := strings.TrimPrefix(src, "/media/")
+		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) != 2 || parts[1] == "" {
+			return
+		}
+		canonical := prefix + parts[1]
+		if src != canonical {
+			selection.SetAttr("src", canonical)
+			changed = true
+		}
+		remote := byHash[parts[1]]
+		if remote == "" {
+			return
+		}
+		if selection.AttrOr("data-remote-src", "") != remote {
+			selection.SetAttr("data-remote-src", remote)
+			changed = true
+		}
+		if strings.HasPrefix(remote, "https://rill-email-inline.invalid/") &&
+			selection.AttrOr("data-inline-image", "") != "1" {
+			selection.SetAttr("data-inline-image", "1")
+			changed = true
+		}
+	})
+	if !changed {
+		return content
+	}
+	body, err := doc.Find("body").Html()
+	if err != nil {
+		return content
+	}
+	return body
 }
 
 type podcastProgressPatch struct {
@@ -507,6 +574,52 @@ func (a *App) handlePatchItemState(w http.ResponseWriter, r *http.Request) error
 		return internalError(err)
 	}
 	writeJSON(w, http.StatusOK, summary)
+	return nil
+}
+
+type itemEmailImagesPatch struct {
+	Allowed *bool `json:"allowed"`
+}
+
+// handlePatchItemEmailImages persists the reader's "显示图片" choice for one
+// email item. Keeping it per item avoids forcing a sender-wide allowlist, and
+// media_json is the existing no-migration extension point for email metadata.
+func (a *App) handlePatchItemEmailImages(w http.ResponseWriter, r *http.Request) error {
+	id, err := apiRouteID(r)
+	if err != nil {
+		return err
+	}
+	var patch itemEmailImagesPatch
+	if err := decodeJSON(r, &patch); err != nil {
+		return err
+	}
+	if patch.Allowed == nil {
+		return badRequest("invalid_email_images", "请提供 allowed")
+	}
+	var mediaRaw, feedURL string
+	err = a.db.QueryRowContext(r.Context(), `
+		SELECT COALESCE(i.media_json, ''), s.feed_url
+		FROM items i JOIN sources s ON s.id = i.source_id
+		WHERE i.id = ?`, id).Scan(&mediaRaw, &feedURL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return notFound("item_not_found", "条目不存在")
+	}
+	if err != nil {
+		return internalError(err)
+	}
+	if !strings.HasPrefix(feedURL, "imap://") {
+		return badRequest("not_email_item", "只有邮件条目支持远程图片放行")
+	}
+	payload := decodeMediaPayload(mediaRaw)
+	payload.EmailImagesAllowed = *patch.Allowed
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return internalError(err)
+	}
+	if _, err := a.db.ExecContext(r.Context(), `UPDATE items SET media_json = ? WHERE id = ?`, string(data), id); err != nil {
+		return internalError(err)
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"email_images_allowed": *patch.Allowed})
 	return nil
 }
 

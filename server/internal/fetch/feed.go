@@ -38,6 +38,9 @@ type FeedItem struct {
 	MediaURLs          []string
 	AudioURL           string
 	AudioType          string
+	// EmailSender is the envelope sender address for IMAP items. It is stored
+	// in media_json so the image allowlist survives without a schema change.
+	EmailSender string
 }
 
 type FeedResult struct {
@@ -75,7 +78,11 @@ func (c *Client) FetchFeed(ctx context.Context, rawURL string, state FetchState,
 		return &FeedResult{NotModified: true, HTTPStatus: response.StatusCode, ETag: state.ETag, LastModified: state.LastModified}, nil
 	}
 	if !isFeedContentType(response.ContentType) {
-		return nil, &ResponseError{Status: response.StatusCode, Message: fmt.Sprintf("响应 Content-Type 不是 Feed：%s", shortContentType(response.ContentType))}
+		hint := ""
+		if response.FinalURL != "" && !sameFeedHost(rawURL, response.FinalURL) {
+			hint = fmt.Sprintf("；Feed 地址被重定向到 %s 的网页，上游可能拒绝了本机出口", finalHostLabel(response.FinalURL))
+		}
+		return nil, &ResponseError{Status: response.StatusCode, Message: fmt.Sprintf("响应 Content-Type 不是 Feed：%s%s", shortContentType(response.ContentType), hint)}
 	}
 	body := response.Body
 	decoded, err := decodeCharset(body, response.ContentType)
@@ -157,6 +164,23 @@ func shortContentType(value string) string {
 		return value[:80]
 	}
 	return value
+}
+
+func sameFeedHost(rawURL, finalURL string) bool {
+	raw, err1 := url.Parse(strings.TrimSpace(rawURL))
+	final, err2 := url.Parse(strings.TrimSpace(finalURL))
+	if err1 != nil || err2 != nil {
+		return true
+	}
+	return strings.EqualFold(raw.Host, final.Host)
+}
+
+func finalHostLabel(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	return "其他站点"
 }
 
 var xmlEncodingPattern = regexp.MustCompile(`(?i)<\?xml[^>]*encoding\s*=\s*["']([^"']+)`)
@@ -346,6 +370,17 @@ func parseFeedDate(value string) (time.Time, bool) {
 // SanitizeContent removes scripts/event handlers and rewrites image URLs to
 // the local media proxy. Relative links are resolved against the entry/page.
 func SanitizeContent(raw, itemLink string, base *url.URL, sourceToken string) (string, string, []string) {
+	return sanitizeContent(raw, itemLink, base, sourceToken, false)
+}
+
+// SanitizeEmailContent keeps email-specific layout and inline images (data:
+// URIs, background/CSS declarations) that are useful for real mail and safe to
+// render. Remote images are still rewritten to the media proxy.
+func SanitizeEmailContent(raw, itemLink string, base *url.URL, sourceToken string) (string, string, []string) {
+	return sanitizeContent(raw, itemLink, base, sourceToken, true)
+}
+
+func sanitizeContent(raw, itemLink string, base *url.URL, sourceToken string, email bool) (string, string, []string) {
 	if strings.TrimSpace(raw) == "" {
 		return "", "", nil
 	}
@@ -365,7 +400,31 @@ func SanitizeContent(raw, itemLink string, base *url.URL, sourceToken string) (s
 				}
 			}
 		}
+		// Responsive email templates occasionally put the only usable URL in
+		// srcset. Use its first candidate rather than losing the image entirely.
+		if email && strings.TrimSpace(src) == "" {
+			rawSrcset := strings.TrimSpace(selection.AttrOr("srcset", ""))
+			if rawSrcset != "" {
+				candidate := strings.TrimSpace(strings.SplitN(rawSrcset, ",", 2)[0])
+				candidate = strings.TrimSpace(strings.SplitN(candidate, " ", 2)[0])
+				if isHTTPURL(candidate) {
+					src = candidate
+				}
+			}
+		}
 		src = strings.TrimSpace(src)
+		// Email clients commonly embed small images as data:image/...;base64.
+		// Keep them in place (bluemonday validates the MIME type) instead of
+		// dropping them as a non-HTTP source.
+		if email && isDataImageURL(src) {
+			selection.SetAttr("data-inline-image", "1")
+			selection.RemoveAttr("srcset")
+			selection.RemoveAttr("data-src")
+			selection.RemoveAttr("data-original")
+			selection.RemoveAttr("data-lazy-src")
+			selection.RemoveAttr("data-url")
+			return
+		}
 		src = resolveURL(baseForItem(itemLink, base), src)
 		if !isHTTPURL(src) {
 			selection.Remove()
@@ -381,6 +440,10 @@ func SanitizeContent(raw, itemLink string, base *url.URL, sourceToken string) (s
 		selection.RemoveAttr("data-url")
 		hash := URLHash(src)
 		selection.SetAttr("src", fmt.Sprintf("/media/%s/%s", sourceToken, hash))
+		selection.SetAttr("data-remote-src", src)
+		if strings.HasPrefix(src, "https://rill-email-inline.invalid/") {
+			selection.SetAttr("data-inline-image", "1")
+		}
 		media = append(media, src)
 	})
 	doc.Find("source,picture").Remove()
@@ -403,14 +466,32 @@ func SanitizeContent(raw, itemLink string, base *url.URL, sourceToken string) (s
 	doc.Find("img").Each(func(_ int, selection *goquery.Selection) {
 		selection.SetAttr("loading", "lazy")
 		selection.SetAttr("decoding", "async")
+		// 微信 mmbiz.qpic.cn 会按 Referer 返回「未经允许不可引用」占位图。
+		// 代理地址本身不受影响；同时保证直接引用远程图片时也不发送 Referer。
+		selection.SetAttr("referrerpolicy", "no-referrer")
 	})
 	htmlBody, err := doc.Find("body").Html()
 	if err != nil {
 		return "", stripHTMLFallback(raw), nil
 	}
 	policy := bluemonday.UGCPolicy()
-	policy.AllowAttrs("loading", "decoding", "alt").OnElements("img")
+	policy.AllowAttrs("loading", "decoding", "alt", "referrerpolicy", "data-remote-src", "data-inline-image").OnElements("img")
 	policy.AllowElements("figure", "figcaption")
+	if email {
+		// Real mail relies on inline table layout and background images. Keep
+		// those declarations so the message looks like the sender intended;
+		// scripts, event handlers and dangerous URL schemes are still removed.
+		policy.AllowDataURIImages()
+		policy.AllowAttrs(
+			"style", "background", "align", "valign", "bgcolor", "border",
+			"cellpadding", "cellspacing", "dir", "class",
+		).Globally()
+		policy.AllowAttrs("color", "face", "size").OnElements("font")
+		policy.AllowElements(
+			"center", "col", "colgroup", "caption", "tfoot",
+			"dd", "dl", "dt", "mark", "q", "abbr", "cite",
+		)
+	}
 	cleaned := strings.TrimSpace(policy.Sanitize(htmlBody))
 	text := strings.TrimSpace(doc.Find("body").Text())
 	text = collapseWhitespace(text)
@@ -437,6 +518,15 @@ func resolveURL(base *url.URL, value string) string {
 	if parsed.Scheme != "" && parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return ""
 	}
+	// Protocol-relative URLs (//cdn.example.com/...) are common in email
+	// templates. They have no scheme, so treat them as HTTPS (or follow the
+	// feed's http scheme) instead of dropping the image.
+	if parsed.Scheme == "" && parsed.Host != "" {
+		parsed.Scheme = "https"
+		if base != nil && base.Scheme == "http" {
+			parsed.Scheme = "http"
+		}
+	}
 	if base != nil && parsed.Scheme == "" {
 		parsed = base.ResolveReference(parsed)
 	}
@@ -449,6 +539,11 @@ func resolveURL(base *url.URL, value string) string {
 func isHTTPURL(value string) bool {
 	parsed, err := url.Parse(value)
 	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != ""
+}
+
+func isDataImageURL(value string) bool {
+	lower := strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(lower, "data:image/") && strings.Contains(lower, ";base64,")
 }
 
 func looksLikeImageURL(value string) bool {
